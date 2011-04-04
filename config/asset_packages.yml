@@ -3,11 +3,12 @@ javascripts:
 - base: 
   - prototype
   - jquery-1.3.2.min
+  - jquery_prototype_compatibility
   - effects
   - controls
   - application
-  - calendar       
-stylesheets: 
+  - calendar
+stylesheets:
 - base: 
   - page
   - defaults

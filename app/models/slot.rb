@@ -337,7 +337,7 @@ class Slot < Renderer
 
 
   def save_function
-    "if(ds=Wagn.draftSavers['#{context}']){ds.stop()}; if (Wagn.runQueue(Wagn.onSaveQueue['#{context}'])) { } else {return false}"
+    "Wagn.saveFromContext(context);if(ds=Wagn.draftSavers['#{context}']){ds.stop()}; if (Wagn.runQueue(Wagn.onSaveQueue['#{context}'])) { } else {return false}"
   end
 
   def cancel_function

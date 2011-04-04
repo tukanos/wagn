@@ -108,7 +108,8 @@ Object.extend(Wagn, {
       Element.addClassName( elem, 'card');
     })
   },
-  line_to_paragraph: function(element) {
+  line_to_paragraph: function line_to_paragraph(element) {
+    var element = $(element);
     Element.removeClassName(element,'line');
     Element.addClassName(element,'paragraph');
   },
