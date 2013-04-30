@@ -1,46 +1,68 @@
-require File.expand_path(File.dirname(__FILE__) + '/../../spec_helper')
+# -*- encoding : utf-8 -*-
+require File.expand_path('../../spec_helper', File.dirname(__FILE__))
 
 describe Card do
   describe ".fetch" do
     it "returns and caches existing cards" do
-      Card.fetch("A").should be_instance_of(Card::Basic)
-      Card.cache.read("a").should be_instance_of(Card::Basic)
-      Card.should_not_receive(:find_by_key)
-      Card.fetch("A").should be_instance_of(Card::Basic)
+      Card.fetch("A").should be_instance_of(Card)
+      Card.cache.read("a").should be_instance_of(Card)
+      mock.dont_allow(Card).find_by_key
+      Card.fetch("A").should be_instance_of(Card)
     end
 
     it "returns nil and caches missing cards" do
       Card.fetch("Zork").should be_nil
-      Card.cache.read("zork").missing.should be_true
+      Card.cache.read("zork").new_card?.should be_true
       Card.fetch("Zork").should be_nil
     end
 
     it "returns nil and caches trash cards" do
-      User.as(:wagbot)
-      Card.fetch("A").destroy!
-      Card.fetch("A").should be_nil
-      Card.should_not_receive(:find_by_key)
-      Card.fetch("A").should be_nil
+      Account.as_bot do
+        Card.fetch("A").delete!
+        Card.fetch("A").should be_nil
+        mock.dont_allow(Card).find_by_key
+        Card.fetch("A").should be_nil
+      end
     end
 
-    it "returns and does not cache builtin cards" do
-      Card.fetch("*head").should be_instance_of(Card::Basic)
-      Card.cache.read("*head").should be_nil
+    it "returns and caches builtin cards" do
+      Card.fetch("*head").should be_instance_of(Card)
+      Card.cache.read("*head").should_not be_nil
     end
 
     it "returns virtual cards and caches them as missing" do
-      User.as(:wagbot)
-      card = Card.fetch("Joe User+*email")
-      card.should be_instance_of(Card::Basic)
-      card.name.should == "Joe User+*email"
-      card.content.should == 'joe@user.com'
-      cached_card = Card.cache.read("joe_user+*email")
-      cached_card.missing?.should be_true
-      cached_card.virtual?.should be_true
+      Account.as_bot do
+        card = Card.fetch("Joe User+*email")
+        card.should be_instance_of(Card)
+        card.name.should == "Joe User+*email"
+        Wagn::Renderer.new(card).render_raw.should == 'joe@user.com'
+      end
+      #card.raw_content.should == 'joe@user.com'
+      #cached_card = Card.cache.read("joe_user+*email")
+      #cached_card.missing?.should be_true
+      #cached_card.virtual?.should be_true
+    end
+
+    it "fetches virtual cards after skipping them" do
+      Card['A+*self'].should be_nil
+      Card.fetch( 'A+*self' ).should_not be_nil
+    end
+    
+
+    it "fetches newly virtual cards" do
+      #pending "needs new cache clearing"
+      Card.fetch( 'A+virtual').should be_nil
+      Account.as_bot { Card.create :name=>'virtual+*right+*structure' }
+      Card.fetch( 'A+virtual').should_not be_nil
+    end
+    
+    it "handles name variants of cached cards" do
+      Card.fetch('yomama+*self').name.should == 'yomama+*self'
+      Card.fetch('YOMAMA+*self').name.should == 'YOMAMA+*self'
     end
 
     it "does not recurse infinitely on template templates" do
-      Card.fetch("*content+*right+*content").should be_nil
+      Card.fetch("*structure+*right+*structure").should be_nil
     end
 
     it "expires card and dependencies on save" do
@@ -48,71 +70,84 @@ describe Card do
       Card.cache.reset_local
       Card.cache.local.keys.should == []
 
-      User.as :wagbot
+      Account.as_bot do
 
-      a = Card.fetch("A")
-      a.should be_instance_of(Card::Basic)
+        a = Card.fetch("A")
+        a.should be_instance_of(Card)
 
-      # expires the saved card
-      Card.cache.should_receive(:delete).with('a')
+        # expires the saved card
+        mock(Card.cache).delete('a')
+        mock(Card.cache).delete(/~\d+/).at_least(12)
 
-      # expires plus cards
-      Card.cache.should_receive(:delete).with('c+a')
-      Card.cache.should_receive(:delete).with('d+a')
-      Card.cache.should_receive(:delete).with('f+a')
-      Card.cache.should_receive(:delete).with('a+b')
-      Card.cache.should_receive(:delete).with('a+c')
-      Card.cache.should_receive(:delete).with('a+d')
-      Card.cache.should_receive(:delete).with('a+e')
-      Card.cache.should_receive(:delete).with('a+b+c')
+        # expires plus cards
+        mock(Card.cache).delete('c+a')
+        mock(Card.cache).delete('d+a')
+        mock(Card.cache).delete('f+a')
+        mock(Card.cache).delete('a+b')
+        mock(Card.cache).delete('a+c')
+        mock(Card.cache).delete('a+d')
+        mock(Card.cache).delete('a+e')
+        mock(Card.cache).delete('a+b+c')
 
-      # expired including? cards
-      Card.cache.should_receive(:delete).with('x').twice
-      Card.cache.should_receive(:delete).with('y').twice
-      a.save!
+        # expired including? cards
+        mock(Card.cache).delete('x').times(2)
+        mock(Card.cache).delete('y').times(2)
+        a.save!
+      end
     end
 
     describe "preferences" do
       before do
-        User.as :wagbot
-      end
-
-      it "prefers builtin virtual card to db cards" do
-        Card.add_builtin(Card.new(:name => "ghost", :content => "Builtin Content"))
-        Card.cache.read("ghost").virtual?.should be_true
-        Card.create!(:name => "ghost", :content => "DB Content")
-#        Card.cache.read("ghost").should be_nil
-        card = Card.fetch("ghost")
-        card.content.should == "Builtin Content"
-        card.virtual?.should be_true
+        Account.as(Card::WagnBotID) # FIXME: as without a block is deprecated
       end
 
       it "prefers db cards to pattern virtual cards" do
-        Card.create!(:name => "y+*right+*content", :content => "Formatted Content")
-        Card.create!(:name => "a+y", :content => "DB Content")
+        c1=Card.create!(:name => "y+*right+*structure", :content => "Formatted Content")
+        c2=Card.create!(:name => "a+y", :content => "DB Content")
         card = Card.fetch("a+y")
         card.virtual?.should be_false
+        card.rule(:structure).should == "Formatted Content"
         card.content.should == "DB Content"
-        card.setting('content').should == "Formatted Content"
       end
 
       it "prefers a pattern virtual card to trash cards" do
-        Card.create!(:name => "y+*right+*content", :content => "Formatted Content")
+        Card.create!(:name => "y+*right+*structure", :content => "Formatted Content")
         Card.create!(:name => "a+y", :content => "DB Content")
-        Card.fetch("a+y").destroy!
+        Card.fetch("a+y").delete!
 
         card = Card.fetch("a+y")
         card.virtual?.should be_true
         card.content.should == "Formatted Content"
       end
 
-      it "should not hit the database for every pattern_virtual lookup" do
-        Card.create!(:name => "y+*right+*content", :content => "Formatted Content")
+      it "should recognize pattern overrides" do
+        #~~~ create right rule
+        tc=Card.create!(:name => "y+*right+*structure", :content => "Right Content")
+        card = Card.fetch("a+y")
+        card.virtual?.should be_true
+        card.content.should == "Right Content"
+        
+#        warn "creating template"
+        tpr = Card.create!(:name => "Basic+y+*type plus right+*structure", :content => "Type Plus Right Content")
+        card = Card.fetch("a+y")
+        card.virtual?.should be_true
+        card.content.should == "Type Plus Right Content"
+
+        #~~~ delete type plus right rule
+        tpr.delete!
+        card = Card.fetch("a+y")
+        card.virtual?.should be_true
+        card.content.should == "Right Content"
+
+      end
+
+      it "should not hit the database for every fetch_virtual lookup" do
+        Card.create!(:name => "y+*right+*structure", :content => "Formatted Content")
         Card.fetch("a+y")
-        Card.should_not_receive(:find_by_key)
+        mock.dont_allow(Card).find_by_key
         Card.fetch("a+y")
       end
-      
+
       it "should not be a new_record after being saved" do
         Card.create!(:name=>'growing up')
         card = Card.fetch('growing up')
@@ -121,42 +156,40 @@ describe Card do
     end
   end
 
-  describe "#fetch_or_new" do
+  describe "#fetch :new=> ..." do
     it "returns a new card if it doesn't find one" do
-      new_card = Card.fetch_or_new("Never Seen Me Before")
-      new_card.should be_instance_of(Card::Basic)
+      new_card = Card.fetch "Never Seen Me Before", :new=>{}
+      new_card.should be_instance_of(Card)
       new_card.new_record?.should be_true
     end
 
     it "returns a card if it finds one" do
-      new_card = Card.fetch_or_new("A+B")
-      new_card.should be_instance_of(Card::Basic)
+      new_card = Card.fetch "A+B", :new=>{}
+      new_card.should be_instance_of(Card)
       new_card.new_record?.should be_false
     end
 
     it "takes a second hash of options as new card options" do
-      new_card = Card.fetch_or_new("Never Before", {}, :type => "Image")
-      new_card.should be_instance_of(Card::Image)
+      new_card = Card.fetch "Never Before", :new=>{ :type => "Image" }
+      new_card.should be_instance_of(Card)
+      new_card.typecode.should == :image
       new_card.new_record?.should be_true
+      Card.fetch( 'Never Before', :new=>{} ).type_id.should == Card::BasicID
     end
   end
 
-  describe "#preload" do
-    it "loads a list of cards into the cache" do
-      a = Card.new(:name => "Appa")
-      Card.preload([a])
-      Card.should_not_receive(:find_by_key)
-      Card.fetch("Appa").should == a
-    end
+  describe "#fetch_virtual" do
+    before { Account.as :joe_user }
 
-    #it "with :local options loads a list of cards into the local cache only" do
-    #  this test is meaningless as long as we have a nil store in testing env.
-    #  a = Card.new(:name => "Appa")
-    #  Card.cache.store.should_not_receive(:read)
-    #  Card.cache.store.should_not_receive(:write)
-    #  Card.preload([a], :local => true)
-    #  Card.fetch("Appa").should == a
-    #end
+    it "should find cards with *right+*structure specified" do
+      Account.as_bot do
+        Card.create! :name=>"testsearch+*right+*structure", :content=>'{"plus":"_self"}', :type => 'Search'
+      end
+      c = Card.fetch("A+testsearch".to_name)
+      assert c.virtual?
+      c.typecode.should == :search_type
+      c.content.should ==  "{\"plus\":\"_self\"}"
+    end
   end
 
   describe "#exists?" do

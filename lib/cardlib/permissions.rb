@@ -1,232 +1,307 @@
-module Cardlib                        
-  class ::Card::PermissionDenied < Wagn::PermissionDenied
-    attr_reader :card
-    def initialize(card)
-      @card = card
-      super build_message 
-    end    
-    
-    def build_message
-      "for card #{@card.name}: #{@card.errors.on(:permission_denied)}"
-    end
+# -*- encoding : utf-8 -*-
+module Cardlib::Permissions
+
+  def ydhpt
+    "You don't have permission to"
   end
-       
-  
-  
-  module Permissions
-    # Permissions --------------------------------------------------------------
-    def ydhpt
-      "#{User.current_user.login}, You don't have permission to"
-    end
 
-    
-    module ClassMethods 
-      def create_ok?()   
-        ::Cardtype.create_ok?(  self.name.gsub(/.*::/,'') )
-      end
-      def create_ok!()   
-        user, type = ::User.current_user.cardname, self.name.gsub(/.*::/,'')
+  def approved?
+    @operation_approved = true
+    @permission_errors = []
 
-        unless self.create_ok?        
-          msg = "You don't have permission to create #{type} cards" 
-          raise Wagn::PermissionDenied.new(msg) 
-        end
-      end
-    end
-
-    
-    def destroy_with_permissions
-      ok! :delete
-      # FIXME this is not tested and the error will be confusing
-      dependents.each do |dep| dep.ok! :delete end
-      destroy_without_permissions
-    end
-    
-    def destroy_with_permissions!
-      ok! :delete
-      dependents.each do |dep| dep.ok! :delete end
-      destroy_without_permissions!
-    end
-
-    def save_with_permissions(perform_checking=true)
-      Rails.logger.debug "Card#save_with_permissions"
-      if perform_checking && approved? || !perform_checking
-        save_without_permissions(perform_checking)
-      else
-        raise ::Card::PermissionDenied.new(self)
-      end
-    end 
-    
-    def save_with_permissions!
-      Rails.logger.debug "Card#save_with_permissions!"
-      if approved?
-begin
-        save_without_permissions!
-rescue Exception => e
-  Rails.logger.info "save_with_perm:#{e.message} #{name} #{Kernel.caller.join("\n")}"
-  raise e
-end
-      else
-        raise ::Card::PermissionDenied.new(self)
-      end
-    end
- 
-    def approved?  
-      self.operation_approved = true    
-      self.permission_errors = []
-      if new_card?
-        approve_create_me
+    if trash
+      ok? :delete
+    else
+      unless updates.keys == ['comment'] # if only updating comment, next section will handle
+        new_card? ? ok?(:create) : ok?(:update)
       end
       updates.each_pair do |attr,value|
-        send("approve_#{attr}")
-      end         
-      permission_errors.each do |err|
-        errors.add :permission_denied, err
+        send "approve_#{attr}"
       end
-      operation_approved
-    end
-    
-    # ok? and ok! are public facing methods to approve one operation at a time
-    def ok?(operation)  
-      self.operation_approved = true    
-      self.permission_errors = []
-      
-      send("approve_#{operation}")     
-      # approve_* methods set errors on the card.
-      # that's what we want when doing approve? on save and checking each attribute
-      # but we don't want just checking ok? to set errors. 
-      # so we hack around the errors added in approve_* by clearing them here.    
-      # self.errors.clear 
-
-      operation_approved
-    end  
-    
-    def ok!(operation)
-      raise ::Card::PermissionDenied.new(self) unless ok?(operation);  true
     end
 
+    @permission_errors.each do |err|
+      errors.add :permission_denied, err
+    end
+    @operation_approved
+  end
 
-    def permit(task, party) #assign permissions
-      ok! :permissions unless new_card?# might need stronger checks on new records 
-      perms = self.permissions.reject { |p| p.task == task.to_s }
-      perms << Permission.new(:task=>task.to_s, :party=>party)
-      self.permissions= perms
-    end
-    
-    def who_can(operation)
-      perm = permissions.reject { |perm| perm.task != operation.to_s }.first   
-      perm && perm.party #? perm.party : nil
-      #perm = Permission.find(:first, :conditions=>{:card_id=>self.id, :task=>operation.to_s })
-      #perm && Role[perm.party_id.to_i] 
-    end 
-    
-    def personal_user
-      return nil if simple?
-      #warn "personal user tag: #{tag.extension}  #{tag.extension.class == ::User}"
-      return tag.extension if tag.extension.class == ::User 
-      return trunk.personal_user 
-    end
-    
-    protected
-    def you_cant(what)
-      "#{ydhpt} #{what}"
-      # => you_cant " #{what}"
-    end
-    
-    def deny_because(why)    
-      [why].flatten.each {|err| permission_errors << err }
-      self.operation_approved = false
+
+  # ok? and ok! are public facing methods to approve one operation at a time
+  #
+  #   fetching: if the optional :trait parameter is supplied, it is passed
+  #      to fetch and the test is perfomed on the fetched card, therefore:
+  #
+  #      :trait=>:account         would fetch this card plus a tag codenamed :account
+  #      :trait=>:roles, :new=>{} would initialize a new card with default ({}) options.
+
+  def ok_with_fetch? operation, opts={}
+    card = opts[:trait].nil? ? self : fetch(opts)
+    card && card.ok_without_fetch?(operation)
+  end
+
+  def ok? operation
+    @operation_approved = true
+    @permission_errors = []
+
+    send "approve_#{operation}"
+    #warn "ok? #{inspect}, #{operation}, #{@operation_approved}"
+    @operation_approved
+  end
+  alias_method_chain :ok?, :fetch # note: method is chained so that we can return the instance variable @operation_approved
+
+  def ok! operation, opts={}
+    raise Card::PermissionDenied.new self unless ok? operation, opts
+  end
+  
+  def update_account_ok? #FIXME - temporary API, I think this is fixed, can we cache any of this for speed, this is accessed for each header
+    id == Account.current_id || ok?( :update, :trait=>:account )
+  end
+
+  def who_can operation
+    #warn "who_can[#{name}] #{(prc=permission_rule_card(operation)).inspect}, #{prc.first.item_cards.map(&:id)}" if operation == :update
+    permission_rule_card(operation).first.item_cards.map(&:id)
+  end
+
+  def permission_rule_card operation
+    opcard = rule_card operation
+    unless opcard
+      errors.add :permission_denied, "No #{operation} rule for #{name}"
+      raise Card::PermissionDenied.new(self)
     end
 
-    def lets_user(operation)
-      party =  who_can(operation)
-      return true if (System.always_ok? and operation != :comment)
-      System.party_ok? party
-    end  
-    
-    def approve_read
-      if reader_type=='Role'
-        (self.operation_approved = false) unless System.role_ok?(reader_id)
+    rcard = Account.as_bot do
+      if opcard.content == '_left' && self.junction?
+        lcard = loaded_left || left_or_new( :skip_virtual=>true, :skip_modules=>true )
+        if operation==:create && lcard.real? && !lcard.was_new_card
+          operation = :update
+        end
+        lcard.permission_rule_card(operation).first
       else
-        testee = template? ? trunk : self
-        (self.operation_approved = false) unless testee.lets_user( :read ) 
+        opcard
       end
     end
-       
-    def approve_create_me  
-      deny_because you_cant("create #{self.type} cards") unless Cardtype.create_ok?(self.type)
-    end
+    return rcard, opcard.rule_class_name
+  end
 
-    def approve_edit
-      approve_task(:edit)
-    end
-    
-    def approve_delete
-      approve_task(:delete)
-    end
-    
-    def approve_name
-      approve_task(:edit) unless new_card?     
-    end
-    
-    def approve_create     
-      raise "must be a cardtype card" unless self.type == 'Cardtype'
-      deny_because you_cant("create #{self.name} cards") unless Cardtype.create_ok?(Cardtype.classname_for(self.name))    
-    end
-                                    
-    def approve_comment
-      approve_task(:comment, 'comment on')
-      deny_because("No comments allowed on template cards")       if template?  
-      deny_because("No comments allowed on hard templated cards") if hard_template
-    end
+  def rule_class_name
+    trunk.type_id == Card::SetID ? cardname.trunk_name.tag : nil
+  end
 
-    def approve_task(operation, verb=nil) #read, edit, comment, delete           
-      verb ||= operation.to_s
-      #testee = template.hard_template? ? trunk : self
-      testee = self
-      deny_because("#{ydhpt} #{verb} this card") unless testee.lets_user( operation ) 
-    end
+  protected
+  def you_cant what
+    "#{ydhpt} #{what}"
+  end
 
-    def approve_type
-      unless new_card?       
-        approve_delete
-#        if right_template and right_template.hard_template? and right_template.type!=type and !allow_type_change
-#          deny_because you_cant( "change the type of this card -- it is hard templated by #{right_template.name}")
-#        end
-      end
-      new_self = clone_to_type( type ) 
-      unless Cardtype.create_ok?(new_self.type)
-        deny_because you_cant("create #{new_self.cardtype.name} cards")
-      end
-    end
+  def deny_because why
+    [why].flatten.each {|err| @permission_errors << err }
+    @operation_approved = false
+  end
 
-    def approve_content
-      unless new_card?
-        approve_edit
-        if tmpl = hard_template 
-          deny_because you_cant("change the content of this card -- it is hard templated by #{tmpl.name}")
+  def lets_account operation
+    #warn "creating *account ??? #{caller[0..25]*"\n"}" if name == '*account' && operation==:create
+    #warn "lets_account[#{operation}]#{inspect}" #if name=='Buffalo'
+    return false if operation != :read    and Wagn::Conf[:read_only]
+    return true  if operation != :comment and Account.always_ok?
+
+    permitted_ids = who_can operation
+
+    if operation == :comment && Account.always_ok?
+      # admin can comment if anyone can
+      !permitted_ids.empty?
+    else
+      #warn "lets_account[#{operation}]#{name} permitted:#{permitted_ids.map {|id|Card[id].name}*', '} " if name=='c1' and operation==:update
+      Account.among? permitted_ids
+    end
+  end
+
+  def approve_task operation, verb=nil
+    deny_because "Currently in read-only mode" if operation != :read && Wagn::Conf[:read_only]
+    verb ||= operation.to_s
+    #warn "approve_task[#{inspect}](#{operation}, #{verb})" if operation == :create
+    deny_because you_cant("#{verb} this card") unless self.lets_account( operation )
+  end
+
+  def approve_account
+    #approve_task :accountable  # maybe we want that setting as a permission task?
+    approve_task :update
+  end
+
+  def approve_create
+    approve_task :create
+  end
+
+  def approve_read
+    #Rails.logger.warn "AR #{inspect} #{Account.always_ok?}"
+    return true if Account.always_ok?
+    @read_rule_id ||= (rr=permission_rule_card(:read).first).id.to_i
+    #warn "AR #{name} #{@read_rule_id}, #{Account.as_card.inspect} #{rr&&rr.name}, RR:#{Account.as_card.read_rules.map{|i|c=Card[i] and c.name}*", "}"
+    unless Account.as_card.read_rules.member?(@read_rule_id.to_i)
+      deny_because you_cant("read this card")
+    end
+  end
+
+  def approve_update
+    approve_task :update
+    approve_read if @operation_approved
+  end
+
+  def approve_delete
+    approve_task :delete
+  end
+
+  def approve_comment
+    approve_task :comment, 'comment on'
+    if @operation_approved
+      deny_because "No comments allowed on template cards" if is_template?
+      deny_because "No comments allowed on hard templated cards" if hard_template
+    end
+  end
+
+  def approve_type_id
+    case
+    when !type_name
+      deny_because("No such type")
+    when !new_card? && reset_patterns && !lets_account(:create)
+      deny_because you_cant("change to this type (need create permission)"  )
+    end
+    #NOTE: we used to check for delete permissions on previous type, but this would really need to happen before the name gets changes
+    #(hence before the tracked_attributes stuff is run)
+  end
+
+  def approve_name
+  end
+
+  def approve_content
+    if !new_card? && hard_template
+      deny_because you_cant("change the content of this card -- it is hard templated by #{template.name}")
+    end
+  end
+
+
+  public
+
+  def set_read_rule
+    if trash == true
+      self.read_rule_id = self.read_rule_class = nil
+    else
+      # avoid doing this on simple content saves?
+      rcard, rclass = permission_rule_card(:read)
+      self.read_rule_id = rcard.id
+      self.read_rule_class = rclass
+      #find all cards with me as trunk and update their read_rule (because of *type plus right)
+      # skip if name is updated because will already be resaved
+
+      #warn "set_read_rule #{rcard.inspect}, #{rclass}"
+      if !new_card? && updates.for(:type_id)
+        Account.as_bot do
+          Card.search(:left=>self.name).each do |plus_card|
+            plus_card = plus_card.refresh.update_read_rule
+          end
         end
       end
     end
-   
-    def approve_permissions
-      return if System.always_ok?
-      unless System.ok?(:set_card_permissions) or new_card?
-        #FIXME-perm.  on new cards we should check that permission has not been altered from default unless user can set permissions. 
-        deny_because you_cant("set permissions" )
+  end
+
+  def update_read_rule
+    Card.record_timestamps = false
+
+    reset_patterns # why is this needed?
+    rcard, rclass = permission_rule_card :read
+    self.read_rule_id = rcard.id #these two are just to make sure vals are correct on current object
+    #warn "updating read rule for #{inspect} to #{rcard.inspect}, #{rclass}"
+
+    self.read_rule_class = rclass
+    Card.where(:id=>self.id).update_all(:read_rule_id=>rcard.id, :read_rule_class=>rclass)
+    expire
+
+    # currently doing a brute force search for every card that may be impacted.  may want to optimize(?)
+    Account.as_bot do
+      Card.search(:left=>self.name).each do |plus_card|
+        if plus_card.rule(:read) == '_left'
+          plus_card.update_read_rule
+        end
       end
     end
+
+  ensure
+    Card.record_timestamps = true
+  end
+
+  # fifo of cards that need read rules updated
+  def update_read_rule_list() @update_read_rule_list ||= [] end
+  def read_rule_updates updates
+    #warn "rrups #{updates.inspect}"
+    @update_read_rule_list = update_read_rule_list.concat updates
+    # to short circuite the queue mechanism, just each the new list here and update
+  end
+
+  def update_queue
+    #warn "update queue[#{inspect}] Q[#{self.update_read_rule_list.inspect}]"
+
+    self.update_read_rule_list.each { |card| card.update_read_rule }
+    self.update_read_rule_list = []
+  end
+
+ protected
+
+  def update_ruled_cards
+    if is_rule?
+#      warn "updating ruled cards for #{name}"
+      self.class.clear_rule_cache
+      left.reset_set_patterns
     
-    def self.included(base)   
-      super
-      base.extend(ClassMethods)
-      base.class_eval do           
-        attr_accessor :operation_approved, :permission_errors
-        alias_method_chain :destroy, :permissions  
-        alias_method_chain :destroy!, :permissions  
-        alias_method_chain :save, :permissions
-        alias_method_chain :save!, :permissions
+      if right_id==Card::ReadID && (@name_or_content_changed || @trash_changed)
+        # These instance vars are messy.  should use tracked attributes' @changed variable
+        # and get rid of @name_changed, @name_or_content_changed, and @trash_changed.
+        # Above should look like [:name, :content, :trash].member?( @changed.keys ).
+        # To implement that, we need to make sure @changed actually tracks trash
+        # (though maybe not as a tracked_attribute for performance reasons?)
+        # AND need to make sure @changed gets wiped after save (probably last in the sequence)
+
+        self.class.clear_read_rule_cache
+        
+#        User.cache.reset
+        Card.cache.reset # maybe be more surgical, just Account.user related
+        expire #probably shouldn't be necessary,
+        # but was sometimes getting cached version when card should be in the trash.
+        # could be related to other bugs?
+        in_set = {}
+        if !(self.trash)
+          if class_id = (set=left and set_class=set.tag and set_class.id)
+            rule_class_ids = Cardlib::Pattern.subclasses.map &:key_id
+            #warn "rule_class_id #{class_id}, #{rule_class_ids.inspect}"
+
+            #first update all cards in set that aren't governed by narrower rule
+             Account.as_bot do
+               cur_index = rule_class_ids.index Card[read_rule_class].id
+               if rule_class_index = rule_class_ids.index( class_id )
+                  # Why isn't this just 'trunk', do we need the fetch?
+                  Card.fetch(cardname.trunk_name).item_cards(:limit=>0).each do |item_card|
+                    in_set[item_card.key] = true
+                    next if cur_index > rule_class_index
+                    item_card.update_read_rule
+                  end
+               elsif rule_class_index = rule_class_ids.index( 0 )
+                 in_set[trunk.key] = true
+                 #warn "self rule update: #{trunk.inspect}, #{rule_class_index}, #{cur_index}"
+                 trunk.update_read_rule if cur_index > rule_class_index
+               else warn "No current rule index #{class_id}, #{rule_class_ids.inspect}"
+               end
+            end
+
+          end
+        end
+
+        #then find all cards with me as read_rule_id that were not just updated and regenerate their read_rules
+        if !new_record?
+          Card.where( :read_rule_id=>self.id, :trash=>false ).reject do |w|
+            in_set[ w.key ]
+          end.each &:update_read_rule
+        end
       end
+    
     end
   end
+
 end

@@ -1,46 +1,25 @@
-class CardMigrationGenerator < Rails::Generator::NamedBase
-  attr_accessor :migration_name
-  
-  def manifest
-    record do |m|           
-      puts "CARD_NAME: #{card.name}"
-      puts "CONTENT:\n#{card.content}\n"      
-              
-      
-      @migration_name = "set_#{sanitized_name}"
-      n = 2
-      while migration_exists?(@migration_name)
-        @migration_name = "set_#{sanitized_name}_#{n}"
-        n += 1
+# -*- encoding : utf-8 -*-
+require 'rails/generators/active_record'
+
+class CardMigrationGenerator < ActiveRecord::Generators::Base
+  source_root File.expand_path('../templates', __FILE__)
+  #argument :card_list, :type => :string, :default => nil
+  argument :attributes, :type => :array, :default => [], :banner => "field[:type][:index] field[:type][:index]"
+
+  def create_migration_file
+#        set_local_assigns!
+    migration_template "card_migration.rb", "db/migrate_cards/#{file_name}.rb"
+  end
+
+  protected
+=begin
+    attr_reader :migration_action
+    
+    def set_local_assigns!
+      if file_name =~ /^(add|remove)_.*_(?:to|from)_(.*)/
+        @migration_action = $1
+        @table_name       = $2.pluralize
       end
-      
-      puts "MIGRATION_NAME: #{migration_name}"
-      
-      # ensure migration dir
-      m.directory File.join('db/migrate', class_path)
-      m.migration_template 'migration.rb.template',  'db/migrate', :migration_file_name=>migration_name
     end
-  end
-  
-  def sanitized_name
-    file_name.to_key.gsub(/\*/,'star_').gsub(/\+/,'_plus_') 
-  end
-  
-  def card
-    User.as(:wagbot)
-    @card||=Card[file_name]
-  end
-  
-  # borrowed this code from rails generator commands-- couldn't figure out how to invoke it from here   
-  def migration_exists?(file_name)
-    not existing_migrations(file_name).empty?
-  end      
-  
-  def existing_migrations(file_name)
-    Dir.glob("#{migration_directory}/[0-9]*_*.rb").grep(/[0-9]+_#{file_name}.rb$/)
-  end
-  
-  def migration_directory 
-    "#{RAILS_ROOT}/db/migrate"
-  end
+=end
 end

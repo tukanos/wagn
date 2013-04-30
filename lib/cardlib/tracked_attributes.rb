@@ -1,177 +1,172 @@
-module Cardlib
-  module TrackedAttributes 
-     
-    def set_tracked_attributes  
-      Rails.logger.debug "Card(#{name})#set_tracked_attributes begin"
-      updates.each_pair do |attr, value| 
-        if send("set_#{attr}", value )
-          updates.clear attr
-        end
-        #warn "SET CHANGED #{attr.to_sym.inspect}"    
-        @changed ||={}; @changed[attr.to_sym]=true 
+# -*- encoding : utf-8 -*-
+module Cardlib::TrackedAttributes
+
+  def set_tracked_attributes
+    @was_new_card = self.new_card?
+    updates.each_pair do |attrib, value|
+      if send("set_#{attrib}", value )
+        updates.clear attrib
       end
-      Rails.logger.debug "Card(#{name})#set_tracked_attributes end"
+      @changed ||={}; @changed[attrib.to_sym]=true
     end
-    
-    
-    # this method conflicts with ActiveRecord since Rails 2.1.0
-    # the only references I see are in cache_spec, so removing for now
-=begin    
-    def changed?(field) 
-      #return false
-      #if updates.emtpy?
-      @changed ||={}; 
-      #warn "GET CHAGNED #{field.inspect}"    
-      !!(@changed[field] && !updates.for?(field))
+    #Rails.logger.debug "Card(#{name})#set_tracked_attributes end"
+  end
+
+
+
+  protected
+  def set_name newname
+    @old_name = self.name_without_tracking
+    return if @old_name == newname.to_s
+    #Rails.logger.warn "rename . #{inspect}, N:#{newname}, O:#{@old_name}"
+
+    @cardname, name_without_tracking = if SmartName===newname
+      [ newname, newname.to_s]
+    else
+      [ newname.to_name, newname]
     end
-=end
-    
-    protected 
-    def set_name(newname)
-      oldname = self.name_without_tracking
-      self.name_without_tracking = newname 
-      
-      return if new_card?
-      return if oldname==newname
+    write_attribute :key, k=cardname.key
+    write_attribute :name, name_without_tracking # what does this do?  Not sure, maybe comment it out and see
 
-      if newname.junction?
-        if newname.to_key != oldname.to_key
-          # move the current card out of the way, in case the new name will require
-          # re-creating a card with the current name, ie.  A -> A+B     
-          tmp_name = "tmp:" + UUID.new.generate      
-          connection.update %{update cards set #{quoted_comma_pair_list(connection, {:name=>"'#{tmp_name}'",:key=>"'#{tmp_name}'"})} where id=#{id}}
-        end
-        self.trunk = Card.find_or_create :name=>newname.left_name
-        self.tag = Card.find_or_create :name=>newname.tag_name
-      else
-        self.trunk = self.tag = nil
-      end         
+    reset_patterns_if_rule saving=true# reset the new name
 
-      if existing_card = Card.find_by_key(newname.to_key) and existing_card != self
-        if existing_card.trash  
-          existing_card.update_attributes! :name=>existing_card.name+"*trash", :confirm_rename=>true
-        else                             
-          # note -- this happens when changing to a name variant.  any special handling needed?
+    Card.expire cardname
+
+    if @cardname.junction?
+      [:left, :right].each do |side|
+        sidename = @cardname.send "#{side}_name"
+        #Rails.logger.warn "sidename #{newname}, #{@old_name}, #{sidename}"
+        sidecard = Card[sidename]
+        old_name_in_way = (sidecard && sidecard.id==self.id) # eg, renaming A to A+B
+        suspend_name(sidename) if old_name_in_way
+        self.send "#{side}_id=", begin
+          if !sidecard || old_name_in_way
+            Card.create! :name=>sidename
+          else
+            sidecard
+          end.id
         end
       end
-            
-      if type=='Cardtype'
-        ::Cardtype.reset_cache
-      end
-            
-      @name_changed = true          
-      @old_name = oldname
-      @search_content_changed=true
-      Wagn::Cache.expire_card(@old_name.to_key)
+    else
+      self.left_id = self.right_id = nil
     end
 
-    def set_type(new_type)
-      #warn "set type called on #{name} to #{new_type}"
-      self.type_without_tracking = new_type 
-      return if new_card?
+    return if new_card?
+    if existing_card = Card.find_by_key(@cardname.key) and existing_card != self
+      if existing_card.trash
+        existing_card.name = tr_name = existing_card.name+'*trash'
+        existing_card.instance_variable_set :@cardname, tr_name.to_name
+        existing_card.set_tracked_attributes
+        #Rails.logger.debug "trash renamed collision: #{tr_name}, #{existing_card.name}, #{existing_card.cardname.key}"
+        existing_card.save!
+      #else note -- else case happens when changing to a name variant.  any special handling needed?
+      end
+    end
+
+    Card.expire @old_name
+    @name_changed = true
+    @name_or_content_changed=true
+  end
+
+  def suspend_name(name)
+    # move the current card out of the way, in case the new name will require
+    # re-creating a card with the current name, ie.  A -> A+B
+    Card.expire name
+    tmp_name = "tmp:" + UUID.new.generate
+    Card.where(:id=>self.id).update_all(:name=>tmp_name, :key=>tmp_name)
+  end
+
+  def set_type_id new_type_id
+    self.type_id_without_tracking= new_type_id
+    if assigns_type? # certain *structure templates
+      update_templatees :type_id => new_type_id
+    end
+    if real?
       on_type_change # FIXME this should be a callback
-      templatees = hard_templatees
-      if !templatees.empty?
-        #warn "going through hard templatees"  
-        templatees.each do |tee|
-          tee.allow_type_change = true  #FIXME? this is a hacky way around the standard validation
-          tee.type = new_type
-          tee.save!
-        end
-      end
-      newcard = self.clone_to_type(new_type)
-      newcard.send(:callback, :before_validation_on_create)
-      newcard.send(:callback, :before_create)
-      #newcard.send(:callback, :after_create)
-      self.extension = newcard.extension
-      self.set_permissions self.permissions.collect{|x| x}
+      reset_patterns
+      include_set_modules # dislike doing this prior to save, but I think it's done to catch set-specific behavior??
+      # do we need to "undo" loaded modules?  Maybe reload defaults?
     end
-    
-    def set_content(new_content)  
-      return false unless self.id           
-      new_content ||= '' 
-      
-      # FIXME?: this code written under influence. may require adjustment
-      # Uncommenting this breaks spec/helpers/slot_spec.rb w/float:<object>..
-      #   it strips wiki content even in transcludes
-      new_content =  WikiContent.clean_html!(new_content) if clean_html?
-      
-      clear_drafts if current_revision_id
-      self.current_revision = Revision.create :card_id=>self.id, :content=>new_content
-      @search_content_changed = true
-    end
-             
-    def set_comment(new_comment)    
-      set_content( content + new_comment )
-    end
-    
-    def set_permissions(perms)
-      self.updates.clear(:permissions)
-      if type=='Cardtype' and !perms.detect{|p| p.task=='create'}
-        party = Role.find( Cardtype.create_party_for( 'Basic' ) )
-        perms << Permission.new(:task=>'create', :party=>party, :card_id=>self.id )
-      end
-      self.permissions_without_tracking = perms.reject {|p| p.party==nil }
-      perms.each do |p| 
-        set_reader( p.party ) if p.task == 'read'
-      end      
-      return true
-    end
-   
-    def set_reader(party)
-      self.reader = party
-      if !party.anonymous?
-        junctions.each do |dep| #note: this could be faster with WQL, but I'm not sure this WQL actually works correctly
-          unless authenticated?(party) and !dep.who_can(:read).anonymous?
-            dep.permit :read, party  
-            dep.save!
-          end
-        end
-      end
-    end
- 
-    def set_initial_content  
-      #Rails.logger.debug "Card(#{name})#set_initial_content start"
-      # set_content bails out if we call it on a new record because it needs the
-      # card id to create the revision.  call it again now that we have the id.
-      
-      #return unless new_card?  # because create callbacks are also called in type transitions
-      #return if on_create_skip_revision
-      set_content updates[:content]
-      updates.clear :content 
-      # normally the save would happen after set_content. in this case, update manually:
-      connection.update(
-        "update cards set current_revision_id=#{current_revision_id} where id=#{id}",
-        "Card Update"
-      )
-      #Rails.logger.debug "Card(#{name})#set_initial_content end"
-    end
-    
-    def cascade_name_changes 
-      return true unless @name_changed
-      ActiveRecord::Base.logger.info("----------------------- CASCADE #{self.name}  -------------------------------------")  
-      
-      deps = self.dependents
-                                            
-      deps.each do |dep|
-        ActiveRecord::Base.logger.info("---------------------- DEP #{dep.name}  -------------------------------------")  
-        cxn = ActiveRecord::Base.connection
-        depname = dep.name.replace_part @old_name, name
-        depkey = depname.to_key    
-        # here we specifically want NOT to invoke recursive cascades on these cards, have to go this 
-        # low level to avoid callbacks.                                                               
-        Card.update_all("name=#{cxn.quote(depname)}, #{cxn.quote_column_name("key")}=#{cxn.quote(depkey)}", "id = #{dep.id}")
-        dep.expire(dep)
-      end 
+    true
+  end
 
-      if !update_referencers || update_referencers == 'false'  # FIXME doing the string check because the radio button is sending an actual "false" string
-        #warn "no updating.."
-        ([self]+deps).each do |dep|
-          ActiveRecord::Base.logger.info("--------------- NOUPDATE REFERRER #{dep.name}  ---------------------------")
-          WikiReference.update_on_destroy(dep, @old_name) 
+  def set_content new_content
+    if self.id #have to have this to create revision
+      new_content ||= ''
+      new_content = CleanHtml.clean! new_content if clean_html?
+      clear_drafts if current_revision_id
+      new_rev = Card::Revision.create :card_id=>self.id, :content=>new_content, :creator_id =>Account.current_id
+      self.current_revision_id = new_rev.id
+      reset_patterns_if_rule saving=true
+      @name_or_content_changed = true
+    else
+      false
+    end
+  end
+
+  def set_comment new_comment
+    #seems hacky to do this as tracked attribute.  following complexity comes from set_content complexity.  sigh.
+    
+    commented = %{
+      #{ content }
+      #{ '<hr>' unless content.blank? }
+      #{ new_comment.to_html }
+      <div class="w-comment-author">--#{
+        if Account.logged_in?
+          "[[#{Account.current.name}]]"
+        else
+          Wagn::Conf[:controller].session[:comment_author] = comment_author if Wagn::Conf[:controller]
+          "#{ comment_author } (Not signed in)"
         end
-      else
-        User.as(:wagbot) do
+      }.....#{Time.now}</div>
+    }
+    
+    if new_card?
+      self.content = commented
+    else
+      set_content commented
+    end
+    true
+  end
+
+  def set_initial_content
+    #warn "Card(#{inspect})#set_initial_content start #{content_without_tracking}"
+    # set_content bails out if we call it on a new record because it needs the
+    # card id to create the revision.  call it again now that we have the id.
+
+    #warn "si cont #{content} #{updates.for?(:content).inspect}, #{updates[:content]}"
+    set_content updates[:content] # if updates.for?(:content)
+    
+    updates.clear :content
+
+    # normally the save would happen after set_content. in this case, update manually:
+    Card.where(:id=>id).update_all(:current_revision_id => current_revision_id)
+    #warn "set_initial_content #{content}, #{@current_revision_id}, s.#{self.current_revision_id} #{inspect}"
+  end
+
+  def cascade_name_changes
+    if @name_changed
+      Rails.logger.debug "-------------------#{@old_name}- CASCADE #{self.name} -------------------------------------"
+
+      self.update_referencers = false if self.update_referencers == 'false' #handle strings from cgi
+      Card::Reference.update_on_rename self, name, self.update_referencers
+
+      deps = self.dependents
+      #warn "-------------------#{@old_name}---- CASCADE #{self.name} -> deps: #{deps.map(&:name)*", "} -----------------------"
+
+      @dependents = nil #reset
+
+      deps.each do |dep|
+        # here we specifically want NOT to invoke recursive cascades on these cards, have to go this low level to avoid callbacks.
+        Card.expire dep.name #old name
+        newname = dep.cardname.replace_part @old_name, name
+        Card.where( :id=> dep.id ).update_all :name => newname.to_s, :key => newname.key
+        Card::Reference.update_on_rename dep, newname, update_referencers
+        Card.expire newname
+      end
+
+      if update_referencers
+        Account.as_bot do
           [self.name_referencers(@old_name)+(deps.map &:referencers)].flatten.uniq.each do |card|
             # FIXME  using "name_referencers" instead of plain "referencers" for self because there are cases where trunk and tag
             # have already been saved via association by this point and therefore referencers misses things
@@ -179,39 +174,25 @@ module Cardlib
             # so at this time X is still including Y, which does not exist.  therefore #referencers doesn't find it, but name_referencers(old_name) does.
             # some even more complicated scenario probably breaks on the dependents, so this probably needs a more thoughtful refactor
             # aligning the dependent saving with the name cascading
-            
-            ActiveRecord::Base.logger.info("------------------ UPDATE REFERRER #{card.name}  ------------------------")
-            next if card.hard_template
-            card.content = Renderer.new(card).replace_references( @old_name, name )
-            card.save! unless card==self
+
+            Rails.logger.debug "------------------ UPDATE REFERER #{card.name}  ------------------------"
+            unless card == self or card.hard_template
+              card = card.refresh
+              card.content = card.replace_references @old_name, name
+              card.save!
+            end
           end
         end
       end
-
-      WikiReference.update_on_create( self )
-      @name_changed = false   
-      true
+      @name_changed = false
     end
-               
-    def self.append_features(base)
-      super 
-      base.after_create :set_initial_content 
-      base.before_save.unshift Proc.new{|rec| rec.set_tracked_attributes }
-      #puts "AFTER CREATE: #{base.after_create}"
-      #base.before_save = base.before_save                           
-      base.after_save :cascade_name_changes   
-      #base.class_eval do 
-       # attr_accessor :on_create_skip_revision
-        #
-        #puts "CALLING ALIAS METHOD CHAIN"
-        #alias_method_chain :save, :tracking
-        #alias_method_chain :save!, :tracking
- 
-      #end
-      base.after_create() do |card|
-        Wagn::Hook.call :after_create, card
-      end
-    end    
-
+    true
   end
+
+  def self.included base
+    super
+    base.after_create :set_initial_content #call from update..._on_create
+    base.after_save :cascade_name_changes
+  end
+
 end

@@ -1,234 +1,143 @@
-# # Filters added to this controller will be run for all controllers in the application.
-# Likewise, all the methods added will be available for all controllers.
-
+# -*- encoding : utf-8 -*-
 class ApplicationController < ActionController::Base
-  require_dependency 'exception_system'
+
+  include Wagn::Exceptions
+
   include AuthenticatedSystem
-  include ExceptionSystem
   include LocationHelper
-  helper :all
-
-  helper_method :main_card?
-
-  attr_accessor :renderer
-
-  include ActionView::Helpers::TextHelper #FIXME: do we have to do this? its for strip_tags() in edit()
+  include Recaptcha::Verify
   include ActionView::Helpers::SanitizeHelper
 
-  before_filter :per_request_setup, :except=>[:render_fast_404]
- # after_filter :set_encoding
-  # OPTIMIZE: render_fast_404 still isn't that fast (?18reqs/sec) 
-  # can we turn sessions off for it and see if that helps?
-  layout :wagn_layout, :except=>[:render_fast_404]
-  
-  
- # def set_encoding
- #   respond_to do |format|
- #     format.text {  headers['Content-Type'] ||= 'text/css' }
- #     format.css {  headers['Content-Type'] ||= 'text/css' }
- #   end  
- # end
-  
-  BUILTIN_LAYOUTS = %w{ blank noside simple pre none }
 
+  helper :all
+  before_filter :per_request_setup, :except=>[:fast_404]
+  layout :wagn_layout, :except=>[:fast_404]
+
+  attr_reader :card
+  attr_accessor :recaptcha_count
+
+  def fast_404
+    message = "<h1>404 Page Not Found</h1>"
+    render :text=>message, :layout=>false, :status=>404
+  end
 
   protected
-
   def per_request_setup
-    Slot.ajax_call=request.xhr?
-    
-    if System.multihost
-      if mapping = MultihostMapping.find_by_requested_host(request.host) || MultihostMapping.find_by_requested_host("")
-        System.base_url = "http://" + mapping.canonical_host
-        System.wagn_name = mapping.wagn_name
-        ActiveRecord::Base.connection.schema_search_path = mapping.wagn_name
-      else
-        return render_fast_404
-      end
-    end
+#    ActiveSupport::Notifications.instrument 'wagn.per_request_setup', :message=>"" do
+      request.format = :html if !params[:format] #is this used??
 
-    Wagn::Cache.re_initialize_for_new_request
-    # Set/Redirect to Canonical Domain
-    if request.raw_host_with_port != System.host and RAILS_ENV=="production"
-      return redirect_to("http://#{System.host}#{request.path}")
-    end
+      # these should not be Wagn::Conf, but more like WagnEnv
+      Wagn::Conf[:host] = host = request.env['HTTP_HOST']
+      Wagn::Conf[:base_url] = 'http://' + host
+      Wagn::Conf[:main_name] = nil
+      Wagn::Conf[:controller] = self
 
-    User.current_user = current_user || User.find_by_login('anon')
+      Wagn::Cache.renew
 
-    @context = params[:context] || 'main_1'
-    @action = params[:action]
+      Wagn::Renderer.ajax_call = ajax?
+      Wagn::Renderer.current_slot = nil
 
-    Renderer.current_slot = nil
+      #warn "set curent_user (app-cont) #{self.current_account_id}, U.cu:#{Account.current_id}"
+      Account.current_id = self.current_account_id || Card::AnonID
+      #warn "set curent_user a #{current_account_id}, U.cu:#{Account.current_id}"
 
-    # reset class caches
-    # FIXME: this is a bit of a kluge.. several things stores as cattrs in modules
-    # that need to be reset with every request (in addition to current user)
-    System.request = request
-    #System.time = Time.now.to_f
-    ## DEBUG
-    ActiveRecord::Base.logger.debug("WAGN: per request setup")
-    load_location
+      # RECAPTCHA HACKS
+      Wagn::Conf[:recaptcha_on] = !Account.logged_in? &&     # this too
+        !!( Wagn::Conf[:recaptcha_public_key] && Wagn::Conf[:recaptcha_private_key] )
+      @recaptcha_count = 0
   end
 
   def wagn_layout
     layout = nil
     respond_to do |format|
-      format.html {
-        unless request.xhr?
-          layout = case
-            when BUILTIN_LAYOUTS.include?(params[:layout]);
-              params[:layout]
-#            when params[:layout] == 'none'; nil
-            else
-              'application'
-            end
-        end
-      }
+      format.html { layout = 'application' unless ajax? }
     end
     layout
   end
 
-  # ----------- (helper) ----------
-  def main_card?
-    @context =~ /^main_([^\_]+)$/
+  def ajax?
+    request.xhr? || params[:simulate_xhr]
   end
 
-
-  # ------------------( permission filters ) -------
-  def view_ok
-    if (@card.new_record? && !@card.virtual?) || @card.ok?(:read)
-      true
-    else
-      render_denied('view')
-    end
+  def html?
+    [nil, 'html'].member?(params[:format])
   end
-
-  def edit_ok
-    @card.ok?(:edit) || render_denied('edit')
-  end
-
-  def create_ok
-    @type = params[:type] || (params[:card] && params[:card][:type]) || 'Basic'
-    @skip_slot_header = true
-    #p "CREATE OK: #{@type}"
-    t = Card.class_for(@type, :cardname) || Card::Basic
-    t.create_ok? || render_denied('create')
-  end
-
-  def remove_ok
-    @card.ok!(:delete) || render_denied('delete')
-  end
-
-
-  # --------------( card loading filters ) ----------
-  def load_card!
-    load_card
-    return @card if @card && @card.known?
-    raise Wagn::NotFound, "We looked everywhere but found no such card (#{params[:id]})."
-  end
-
-  def load_card_with_cache
-    return load_card(cache=true)
-  end
-
-  def load_card(cache=false)
-    return @card=nil unless id = params[:id]
-    return (@card=Card.find(id)) if id =~ /^\d+$/
-    name = Cardname.unescape(id)
-    card_params = params[:card] ? params[:card].clone : {}
-    @card = Card.fetch_or_new(name, {}, card_params)
-  end
-
-  def load_card_and_revision
-    params[:rev] ||= @card.revisions.count - @card.drafts.length
-    @revision_number = params[:rev].to_i
-    @revision = @card.revisions[@revision_number - 1]
-  end
-
 
   # ----------( rendering methods ) -------------
 
-  # dormant code.
-  def render_jsonp(args)
-    str = render_to_string args
-    render :json=>(params[:callback] || "wadget") + '(' + str.to_json + ')'
-  end
-
-  def render_update_slot(stuff="", message=nil, &proc)
-    render_update_slot_element(name="", stuff, message, &proc)
-  end
-
-  # FIXME: this should be fixed to use a call to getSlotElement() instead of default
-  # selectors, so that we can reject elements inside nested slots.
-  def render_update_slot_element(name, stuff="", message=nil)
-    render :update do |page|
-      page.extend(WagnHelper::MyCrappyJavascriptHack)
-      elem_code = "getSlotFromContext('#{get_slot.context}')"
-      unless name.empty?
-        elem_code = "getSlotElement(#{elem_code}, '#{name}')"
-      end
-      page.select_slot(elem_code).each() do |target, index|
-        target.update(stuff) unless stuff.empty?
-        yield(page, target) if block_given?
-      end
-      page.wagn.messenger.log(message) if message
-    end
-  end
-
-  def render_denied(action = '')
-    @deny = action
-    render :controller=>'card', :action=>'denied', :status=>403
-    return false
-  end
-
-  def handling_errors
-    if @card.errors.present?
-      render_card_errors(@card)
+  def wagn_redirect url
+    url = wagn_url url #make sure we have absolute url
+    if ajax?
+      render :text => url, :status => 303
     else
-      yield
+      redirect_to url
     end
   end
 
-  def render_card_errors(card=nil)
-    card ||= @card
-    stuff = %{<div class="error-explanation">
-      <h2>Rats. Issue with #{card.name && card.name.upcase} card:</h2><p>} +
-        card.errors.map do |attr, msg|
-          "#{attr.gsub(/base/, 'captcha').upcase }: #{msg}"
-        end.join(",<br> ") +
-        '</p></div>'
 
-    # Create used this scroll
-    #<%= javascript_tag 'scroll(0,0)'
+  def render_errors
+    view   = card.error_view   || :errors
+    status = card.error_status || 422
+    show view, status
+  end
 
-    #errors.each{|attr,msg| puts "#{attr} - #{msg}" }
-    # getNextElement() will crawl up nested slots until it finds one with a notice div
 
-    on_error_js = ""
+  def show view = nil, status = 200
+    format = request.parameters[:format]
+    format = :file if !FORMATS.split('|').member? format #unknown format
 
-    if captcha_required?
-      key = @card.new_record? ? "new" : @card.name.to_key
-      on_error_js << %{ document.getElementById('dynamic_recaptcha-#{key}').innerHTML='<span class="faint">loading captcha</span>'; }
-      on_error_js << %{ Recaptcha.create('#{ENV['RECAPTCHA_PUBLIC_KEY']}', document.getElementById('dynamic_recaptcha-#{key}'),RecaptchaOptions); }
+    opts = params[:slot] || {}
+    opts[:view] = view || params[:view]      
+
+    renderer = Wagn::Renderer.new card, :controller=>self, :format=>format
+    result = renderer.render_show opts
+    status = renderer.error_status || status
+    
+    if format==:file && status==200
+      send_file *result
+    else
+      args = { :text=>result, :status=>status }
+      args[:content_type] = 'text/text' if format == :file
+      render args
     end
+  end
+  
 
-    js_tag = %{<%= javascript_tag(%{#{on_error_js}}) %>}
-    stuff_with_javascript = stuff + js_tag
 
-    case
-      when requesting_ajax? && !params['_update'];
-        render :update do |page|
-          page << %{notice = getNextElement(#{get_slot.selector},'notice');\n}
-          page << %{notice.update('#{escape_javascript(stuff)}');\n}
-          page << on_error_js
+  rescue_from Exception do |exception|
+    Rails.logger.info "exception = #{exception.class}: #{exception.message}"
+    
+    @card ||= Card.new
+    
+    view, status = case exception
+      ## arguably the view and status should be defined in the error class;
+      ## some are redundantly defined in view
+      when Wagn::PermissionDenied, Card::PermissionDenied
+        [ :denial, 403]
+      when Wagn::NotFound, ActiveRecord::RecordNotFound, ActionController::MissingFile
+        [ :not_found, 404 ]        
+      when Wagn::BadAddress
+        [ :bad_address, 404 ]
+      when Wagn::Oops
+        card.errors.add :exception, exception.message 
+        # Wagn:Oops error messages are visible to end users and are generally not treated as bugs.
+        # Probably want to rename accordingly.
+        [ :errors, 422]
+      else #the following indicate a code problem and therefore require full logging
+        Rails.logger.debug exception.backtrace*"\n"
+        notify_airbrake exception if Airbrake.configuration.api_key
+
+        if ActiveRecord::RecordInvalid === exception
+          [ :errors, 422]
+        elsif Wagn::Conf[:migration] or Rails.logger.level == 0 # could also just check non-production mode...
+          raise exception
+        else
+          [ :server_error, 500 ]
         end
-      when requesting_ajax? && params['_update'];
-        render :inline=>stuff_with_javascript, :layout=>nil, :status=>422
-      when !requesting_ajax?;
-        render :inline=>stuff_with_javascript, :layout=>'application', :status=>422
-    end
-  end
+      end
 
+    show view, status
+  end
 end
 
 

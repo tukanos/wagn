@@ -1,85 +1,129 @@
-module Cardlib
-  module References
-    module ClassMethods 
-    end
+# -*- encoding : utf-8 -*-
+module Cardlib::References
+  def name_referencers link_name=nil
+    link_name = link_name.nil? ? key : link_name.to_name.key
+    Card.all :joins => :out_references, :conditions => { :card_references => { :referee_key => link_name } }
+  end
+  
+  def extended_referencers
+    # FIXME .. we really just need a number here.
+    (dependents + [self]).map(&:referencers).flatten.uniq
+  end
 
-    protected   
+  def replace_references old_name, new_name
+    obj_content = ObjectContent.new content, {:card=>self}
     
-    def update_references_on_create  
-      WikiReference.update_on_create(self)  
-
-      # FIXME: bogus blank default content is set on hard_templated cards...
-      User.as(:wagbot) {
-        Renderer.new(self).update_references
-      }
-      expire_templatee_references
-    end
-    
-    def update_references_on_update
-      Renderer.new(self).update_references 
-      expire_templatee_references
-    end
-
-    def update_references_on_destroy
-      WikiReference.update_on_destroy(self)
-      expire_templatee_references
-    end
-
-    def expire_cache
-      expire(self)
-      self.hard_templatees.each {|c| expire(c) }
-      self.dependents.each {|c| expire(c) }
-      self.referencers.each {|c| expire(c) }
-      self.name_referencers.each{|c| expire(c)}
-      # FIXME: this will need review when we do the new defaults/templating system
-      #if card.changed?(:content)
-
-      # this seems like oodles of unnecessary instantiations to me -efm
-    end
-    
-    def expire(card)
-      Wagn::Cache.expire_card card.key
-    end
-    
-    def self.included(base)   
-      super
-      base.extend(ClassMethods)
-      base.class_eval do           
-        has_many :name_references, :class_name=>'WikiReference',
-          :finder_sql=>%q{SELECT * from wiki_references w where w.referenced_name=#{ActiveRecord::Base.connection.quote(key)}}
-
-        has_many :in_references,:class_name=>'WikiReference', :foreign_key=>'referenced_card_id'
-        has_many :out_references,:class_name=>'WikiReference', :foreign_key=>'card_id', :dependent=>:destroy
-
-        has_many :in_transclusions, :class_name=>'WikiReference', :foreign_key=>'referenced_card_id',:conditions=>["link_type in (?,?)",WikiReference::TRANSCLUSION, WikiReference::WANTED_TRANSCLUSION]
-        has_many :out_transclusions,:class_name=>'WikiReference', :foreign_key=>'card_id',           :conditions=>["link_type in (?,?)",WikiReference::TRANSCLUSION, WikiReference::WANTED_TRANSCLUSION]
-
-        has_many :in_links, :class_name=>'WikiReference', :foreign_key=>'referenced_card_id',:conditions=>["link_type=?",WikiReference::LINK]
-        has_many :out_links,:class_name=>'WikiReference', :foreign_key=>'card_id',:conditions=>["link_type=?",WikiReference::LINK]
-
-        has_many :referencers, :through=>:in_references
-        has_many :referencees, :through=>:out_references
-
-        has_many :transcluders, :through=>:in_transclusions, :source=>:referencer
-        has_many :transcludees, :through=>:out_transclusions, :source=>:referencee
-
-        has_many :linkers, :through=>:in_links, :source=>:referencer
-        has_many :linkees, :through=>:out_links, :source=>:referencee
-        
-        
-        after_create :update_references_on_create
-        after_destroy :update_references_on_destroy
-        after_update :update_references_on_update
-        
-        after_save :expire_cache
+    obj_content.find_chunks( Chunks::Reference ).select do |chunk|
+      if old_ref_name = chunk.referee_name and new_ref_name = old_ref_name.replace_part(old_name, new_name)
+        chunk.referee_name = chunk.replace_reference old_name, new_name
+        Card::Reference.where( :referee_key => old_ref_name.key ).update_all :referee_key => new_ref_name.key
       end
-      
-      def name_referencers(rname = key)
-        Card.find_by_sql(
-          "SELECT DISTINCT c.* FROM cards c JOIN wiki_references r ON c.id = r.card_id "+
-          "WHERE (r.referenced_name = #{ActiveRecord::Base.connection.quote(rname.to_key)})"
-        )
+    end
+
+    obj_content.to_s
+  end
+
+  def update_references rendered_content = nil, refresh = false
+    raise "update references should not be called on new cards" if id.nil?
+
+    Card::Reference.delete_all_from self
+
+    # FIXME: why not like this: references_expired = nil # do we have to make sure this is saved?
+    #Card.update( id, :references_expired=>nil )
+    #  or just this and save it elsewhere?
+    #references_expired=nil
+    
+    connection.execute("update cards set references_expired=NULL where id=#{id}")
+  #  references_expired = nil
+    expire if refresh
+
+    rendered_content ||= ObjectContent.new(content, {:card=>self} )
+    
+    rendered_content.find_chunks(Chunks::Reference).each do |chunk|
+      if referee_name = chunk.referee_name # name is referenced (not true of commented inclusions)
+        referee_id = chunk.referee_id   
+        if id != referee_id               # not self reference
+          
+          #update_references chunk.referee_name if ObjectContent === chunk.referee_name
+          # for the above to work we will need to get past delete_all!
+          
+          Card::Reference.create!(
+            :referer_id  => id,
+            :referee_id  => referee_id,
+            :referee_key => referee_name.key,
+            :ref_type    => Chunks::Link===chunk    ? 'L' : 'I',
+            :present     => chunk.referee_card.nil? ?  0  :  1
+          )
+        end
       end
     end
   end
+
+
+  # ---------- Referenced cards --------------
+
+  def referencers
+    return [] unless refs = references
+    refs.map(&:referer_id).map( &Card.method(:fetch) ).compact
+  end
+
+  def includers
+    return [] unless refs = includes
+    refs.map(&:referer_id).map( &Card.method(:fetch) ).compact
+  end
+
+
+  # ---------- Referencing cards --------------
+
+  def referencees
+    return [] unless refs = out_references
+    refs.map { |ref| Card.fetch ref.referee_key, :new=>{} }.compact
+  end
+
+  def includees
+    return [] unless refs = out_includes
+    refs.map { |ref| Card.fetch ref.referee_key, :new=>{} }.compact
+  end
+
+  def self.included base
+
+    super
+
+    base.class_eval do
+      # ---------- Reference associations -----------
+      has_many :references,     :class_name => :Reference, :foreign_key => :referee_id
+      has_many :includes,       :class_name => :Reference, :foreign_key => :referee_id, :conditions => { :ref_type => 'I' }
+
+      has_many :out_references, :class_name => :Reference, :foreign_key => :referer_id
+      has_many :out_includes,   :class_name => :Reference, :foreign_key => :referer_id, :conditions => { :ref_type => 'I' }
+
+      after_create  :update_references_on_create
+#      after_destroy :update_references_on_destroy
+      after_update  :update_references_on_update
+    end
+  end
+
+  protected
+
+  def update_references_on_create
+    Card::Reference.update_existing_key self
+
+    # FIXME: bogus blank default content is set on hard_templated cards...
+    Account.as_bot do
+      self.update_references
+    end
+    expire_templatee_references
+    #obj_content.to_s
+  end
+
+  def update_references_on_update
+    self.update_references
+    expire_templatee_references
+  end
+
+  def update_references_on_delete
+    Card::Reference.update_on_delete self
+    expire_templatee_references
+  end
+
 end

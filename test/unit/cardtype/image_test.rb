@@ -1,24 +1,18 @@
-require File.dirname(__FILE__) + '/../../test_helper'
-class Card::ImageTest < ActiveSupport::TestCase       
-  # required to use ActionController::TestUploadedFile 
-  require 'action_controller'
-  require 'action_controller/test_process.rb'
-  
-  
-  
+# -*- encoding : utf-8 -*-
+require File.expand_path('../../test_helper', File.dirname(__FILE__))
+class Wagn::Set::Type::ImageTest < ActiveSupport::TestCase
+  #require 'action_controller'
+
+
   def setup
     super
     setup_default_user
   end
-  
-  def test_image_creation
-    path = "#{RAILS_ROOT}/test/fixtures/mao2.jpg"
-    mimetype = "image/jpeg"
-      
-    card_image = CardImage.create :uploaded_data => ActionController::TestUploadedFile.new(path, mimetype) 
-    @c=Card::Image.create( :name => "Bananamaster", :attachment_id=>card_image.id )
 
-    assert_instance_of Card::Image, @c
+  def test_image_creation
+    card=Card.create :name => "Bananamaster", :typecode=>'image',
+                   :attach=>File.new("#{Rails.root}/test/fixtures/mao2.jpg")
+    assert_match /^\/files\/Bananamaster-original-\d+/, card.attach.url
   end
-  
+
 end

@@ -1,81 +1,41 @@
+# -*- encoding : utf-8 -*-
 module AuthenticatedSystem
   protected
   def logged_in?
-    current_user
+    Account.logged_in?
   end
 
   # Accesses the current user from the session.
-  def current_user
-    #session[:user]    
-    @current_user ||= session[:user] ? User.find_by_id(session[:user]) : nil
+  def current_account_id
+    @current_account_id ||= begin
+      if card_id = session[:user]
+        if User[ card_id ]
+          card_id
+        else
+          session[:user] = nil
+        end
+      end
+    end
+  rescue Exception => e
+    #warn "except #{e.inspect}, #{e.backtrace*"\n"}"
+    session[:user] = nil
+    raise e
   end
 
   # Store the given user in the session.
-  def current_user=(new_user)
-    #session[:user] = new_user
-    session[:user] = new_user.nil? ? nil : new_user.id
-    @current_user = new_user
+  def current_account_id= card_id
+    @current_account_id = session[:user] = card_id
   end
 
-  # Check if the user is authorized.
-  #
-  # Override this method in your controllers if you want to restrict access
-  # to only a few actions or if you want to check if the user
-  # has the correct rights.
-  #
-  # Example:
-  #
-  #  # only allow nonbobs
-  #  def authorize?(user)
-  #    user.login != "bob"
-  #  end
-  def authorized?(user)
-     true
-  end
-
-  # Check whether or not to protect an action.
-  #
-  # Override this method in your controllers if you only want to protect
-  # certain actions.
-  #
-  # Example:
-  #
-  #  # don't protect the login and the about method
-  #  def protect?(action)
-  #    if ['action', 'about'].include?(action)
-  #       return false
-  #    else
-  #       return true
-  #    end
-  #  end
-  def protect?(action)
-    true
-  end
-
-  # Filter method to enforce a login requirement.
-  #
-  # To require logins for all actions, use this in your controllers:
-  #
-  #   before_filter :login_required
-  #
-  # To require logins for specific actions, use this in your controllers:
-  #
-  #   before_filter :login_required, :only => [ :edit, :update ]
-  #
-  # To skip this in a subclassed controller:
-  #
-  #   skip_before_filter :login_required
   #
   def login_required
-    # Skip this filter if the requested action is not protected
-    return true unless protect?(action_name)
 
-    # Check if user is logged in and authorized
-    return true if logged_in? and authorized?(current_user)
+    # Check if user is logged in
+    return true if logged_in?
 
     # Store current location so that we can redirect back after login
     store_location
-    
+
 
     # Call access_denied for an appropriate redirect and stop the filter
     # chain here
@@ -91,29 +51,28 @@ module AuthenticatedSystem
   # to access the requested action.  For example, a popup window might
   # simply close itself.
   def access_denied
-    #redirect_to :controller => '/account', :action => 'login'
-    login_url = System.base_url + "/account/signin"
-    render :inline=>%{ <%= javascript_tag "document.location.href='#{login_url}'" %>}
-  end  
+    wagn_redirect( Wagn::Conf[:base_url] + url_for(:controller=>'account', :action=>'signin') )
+  end
 
   # Store the URI of the current request in the session.
   #
   # We can return to this location by calling #redirect_back_or_default.
   def store_location
-    session[:return_to] = request.request_uri
+    session[:return_to] = request.fullpath
   end
 
   # Redirect to the URI stored by the most recent store_location call or
   # to the passed default.
   def redirect_back_or_default(default)
-    session[:return_to] ? redirect_to(session[:return_to]) : 
+    session[:return_to] ? redirect_to(session[:return_to]) :
       (default.nil? ? redirect_to('/') : redirect_to(default))
     session[:return_to] = nil
   end
 
-  # Inclusion hook to make #current_user and #logged_in?
+  # Inclusion hook to make #current_account_id and #logged_in?
   # available as ActionView helper methods.
   def self.included(base)
-    base.send :helper_method, :current_user, :logged_in?
+    super
+    base.send :helper_method, :current_account_id, :logged_in?
   end
 end

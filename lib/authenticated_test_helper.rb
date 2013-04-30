@@ -1,18 +1,18 @@
+# -*- encoding : utf-8 -*-
 module AuthenticatedTestHelper
   # Sets the current user in the session from the user fixtures.
-  def login_as(user)
-    @request.session[:user] = User.find_by_login(user.to_s).id
-    User.current_user = User.find(@request.session[:user])
+  def login_as user
+    Account.current_id = @request.session[:user] = (uc=Card[user.to_s] and uc.id)
+    #warn "(ath)login_as #{user.inspect}, #{Account.current_id}, #{@request.session[:user]}"
   end
-                 
+
   def signout
-    @request.session[:user] = nil
-    User.current_user = @request.session[:user]
+    Account.current_id = @request.session[:user] = nil
   end
-  
-  
+
+
   # Assert the block redirects to the login
-  # 
+  #
   #   assert_requires_login(:bob) { get :edit, :id => 1 }
   #
   def assert_requires_login(user = nil, &block)
@@ -22,7 +22,7 @@ module AuthenticatedTestHelper
   end
 
   # Assert the block accepts the login
-  # 
+  #
   #   assert_accepts_login(:bob) { get :edit, :id => 1 }
   #
   # Accepts anonymous logins:
@@ -43,23 +43,23 @@ module AuthenticatedTestHelper
   #      # ...
   #    end
   #  end
-  # 
+  #
 
-  
+
   def assert_new_account(&block)
-    assert_difference(User, :count, 1) do 
-      assert_difference Card, :count, 1, &block
+    assert_difference(User, :count, 1) do
+      assert_difference Card.where(:type_id=>Card::UserID), :count, 1, &block
     end
   end
-  
-  def assert_no_new_account(&block) 
-    assert_no_difference(User, :count) do 
-      assert_no_difference Card, :count, &block
+
+  def assert_no_new_account(&block)
+    assert_no_difference(User, :count) do
+      assert_no_difference Card.where(:type_id=>Card::UserID), :count, &block
     end
-  end   
-  
+  end
+
   def assert_status(email, status)
     u = User.find_by_email(email)
-    assert_equal status, u.status 
+    assert_equal status, u.status
   end
 end

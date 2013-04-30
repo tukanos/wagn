@@ -14,7 +14,7 @@ unless Rake::TaskManager.methods.include?(:redefine_task)
         deps = deps.collect {|d| d.to_s }
         task = @tasks[task_name.to_s] = task_class.new(task_name, self)
         task.application = self
-        @last_comment = nil               
+        @last_comment = nil
         task.enhance(deps, &block)
         task
       end
@@ -28,17 +28,24 @@ unless Rake::TaskManager.methods.include?(:redefine_task)
     end
   end
 end
- 
-namespace :db do
+
+namespace :db do  
+  namespace :fixtures do
+    desc "Load fixtures into the current environment's database.  Load specific fixtures using FIXTURES=x,y"
+    task :load => :environment do
+      require 'active_record/fixtures'
+      ActiveRecord::Base.establish_connection(::Rails.env.to_sym)
+      (ENV['FIXTURES'] ? ENV['FIXTURES'].split(/,/) : Dir.glob(File.join(Rails.root.to_s, 'test', 'fixtures', '*.{yml,csv}'))).each do |fixture_file|
+        ActiveRecord::Fixtures.create_fixtures('test/fixtures', File.basename(fixture_file, '.*'))
+      end
+    end
+  end
+  
   namespace :test do
     desc 'Prepare the test database and load the schema'
-    Rake::Task.redefine_task( :prepare => :environment ) do        
-      if ENV['RELOAD_TEST_DATA'] == 'true' || ENV['RUN_CODE_RUN']           
-        ENV['RAILS_ENV'] = 'development'
-        puts ">> loading db:test structure"    
-        puts `rake db:test:clone`
-        puts ">> loading test fixtures"
-        puts `rake db:fixtures:load RAILS_ENV=test`
+    Rake::Task.redefine_task( :prepare => :environment ) do
+      if ENV['RELOAD_TEST_DATA'] == 'true' || ENV['RUN_CODE_RUN']
+        puts `env RAILS_ENV=test rake wagn:create`
       else
         puts "skipping loading test data.  to force, run  env RELOAD_TEST_DATA=true rake db:test:prepare"
       end

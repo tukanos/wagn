@@ -1,95 +1,111 @@
-require File.dirname(__FILE__) + '/../../spec_helper'
-   
+# -*- encoding : utf-8 -*-
+require File.expand_path('../../spec_helper', File.dirname(__FILE__))
+
 
 describe Card do
-  before do 
-    User.as :wagbot
-  end
-  
+
   describe "#hard_templatees" do
-    it "for User+*type+*content should return all Users" do
-      Card.create(:name=>'User+*type+*content').hard_templatees.map(&:name).sort.should == [
-        "Joe Admin", "Joe Camel", "Joe User", "John", "No Count", "Sample User", "Sara", "u1", "u2", "u3"
-      ]
+    it "for User+*type+*structure should return all Users" do
+      Account.as_bot do
+        c=Card.create(:name=>'User+*type+*structure')
+        c.hard_templatee_names.sort.should == [
+          "Joe Admin", "Joe Camel", "Joe User", "John", "No Count", "Sample User", "Sara", "u1", "u2", "u3"
+        ]
+      end
     end
   end
-  
-  it "#content_template" do
-    pending
-  end
-  
+
   it "#expire_templatee_references" do
-    pending
+    #TESTME
   end
-  
+
 end
+
+
+
 
 
 describe Card, "with right content template" do
   before do
-    User.as :joe_user
-    @bt = Card.create! :name=>"birthday+*right+*content", :type=>'Date', :content=>"Today!"
+    Account.as_bot do
+      @bt = Card.create! :name=>"birthday+*right+*structure", :type=>'Date', :content=>"Today!"
+    end
+    Account.as :joe_user
     @jb = Card.create! :name=>"Jim+birthday"
-  end       
- 
+  end
+
   it "should have default content" do
-    Slot.new(@jb).render(:raw).should == 'Today!'
-  end        
+    Wagn::Renderer.new(@jb)._render_raw.should == 'Today!'
+  end
+
+  it "should change type and content with template" do
+    Account.as_bot do
+      @bt.content = "Tomorrow"
+      @bt.type = 'Phrase'
+      @bt.save!
+    end
+    jb = @jb.refresh force=true
+    Wagn::Renderer.new( jb ).render(:raw).should == 'Tomorrow'
+    jb.type_id.should == Card::PhraseID    
+  end
   
-  it "should change content with template" do
-    @bt.content = "Tomorrow"; @bt.save!
-    Slot.new( Card['Jim+birthday']).render(:raw).should == 'Tomorrow'
-  end 
+  it "should have type and content overridden by (new) type_plus_right set" do
+    Account.as_bot do
+      Card.create! :name=>'Basic+birthday+*type plus right+*structure', :type=>'PlainText', :content=>'Yesterday'
+    end
+    jb = @jb.refresh force=true
+    jb.raw_content.should == 'Yesterday'
+    jb.type_id.should == Card::PlainTextID
+  end
 end
 
 
 describe Card, "with right default template" do
-  before do 
-    User.as :wagbot  do
+  before do
+    Account.as_bot  do
       @bt = Card.create! :name=>"birthday+*right+*default", :type=>'Date', :content=>"Today!"
-      @bt.permit(:comment, Role['auth']);  @bt.permit(:delete, Role['admin'])
-      @bt.save!
     end
-    User.as :joe_user                                         
+    Account.as :joe_user
     @jb = Card.create! :name=>"Jim+birthday"
   end
-               
+
   it "should have default cardtype" do
-    @jb.type.should == 'Date'
+    @jb.typecode.should == :date
   end
-  
+
   it "should have default content" do
     Card['Jim+birthday'].content.should == 'Today!'
-  end
-  
-  it "should have default permissions" do
-    [:read, :edit, :comment, :delete].each do |task| 
-      @jb.who_can(task).should== @bt.who_can(task)
-    end
   end
 end
 
 describe Card, "templating" do
   before do
-    User.as :joe_user
-    @dt = Card.create! :name=>"Date+*type+*content", :type=>'Basic', :content=>'Tomorrow'
-    @bt = Card.create! :name=>"birthday+*right+*content", :type=>'Date', :content=>"Today!"      
-    @jb =  Card.new :name=>"Jim+birthday"
-  end       
-  
+    Account.as_bot do
+      Card.create :name=>"Jim+birthday", :content=>'Yesterday'
+      @dt = Card.create! :name=>"Date+*type+*structure", :type=>'Basic', :content=>'Tomorrow'
+      @bt = Card.create! :name=>"birthday+*right+*structure", :type=>'Date', :content=>"Today"
+    end
+  end
+
   it "*right setting should override *type setting" do
-    Slot.new(@jb).render(:raw).should == 'Today!'
+    Card['Jim+birthday'].raw_content.should == 'Today'
+  end
+
+  it "should defer to normal content when *structure rule's content is (exactly) '_self'" do
+    Account.as_bot { Card.create! :name=>'Jim+birthday+*self+*structure', :content=>'_self' }
+    Card['Jim+birthday'].raw_content.should == 'Yesterday'
   end
 end
 
 describe Card, "with type content template" do
   before do
-    User.as :joe_user
-    @dt = Card.create! :name=>"Date+*type+*content", :type=>'Basic', :content=>'Tomorrow'
-  end       
-  
+    Account.as_bot do
+      @dt = Card.create! :name=>"Date+*type+*structure", :type=>'Basic', :content=>'Tomorrow'
+    end
+  end
+
   it "should return templated content even if content is passed in" do
-    Slot.new(Card.new(:type=>'Date', :content=>'')).render(:raw).should == 'Tomorrow'
+    Wagn::Renderer.new(Card.new(:type=>'Date', :content=>''))._render(:raw).should == 'Tomorrow'
   end
 end
 

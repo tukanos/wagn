@@ -1,64 +1,152 @@
-require 'rubygems'
+# -*- encoding : utf-8 -*-
 require 'spork'
-ENV["RAILS_ENV"] = "test"
-require 'assert2/xhtml'
+ENV["RAILS_ENV"] = 'test'
 
-Spork.prefork do
-  require File.expand_path(File.dirname(__FILE__) + "/../config/wagn_initializer")
-  Spork.trap_class_method(Wagn::Initializer,"load")
+module MySpecHelpers
+  def render_test_card card
+    renderer = Wagn::Renderer.new card
+    renderer.add_name_context card.name
+    renderer.process_content
+  end
 
-  require File.expand_path(File.dirname(__FILE__) + "/../config/environment")
-  require 'spec'
-  require 'spec/autorun'
-  require 'spec/rails' 
-  
-  require "email_spec"
-  
-  
-  # Loading more in this block will cause your tests to run faster. However, 
-  # if you change any configuration or code from libraries loaded here, you'll
-  # need to restart spork for it take effect.
-  # This file is copied to ~/spec when you run 'ruby script/generate rspec'
-  # from the project root directory.
-
-  Spec::Runner.configure do |config|
-    # If you're not using ActiveRecord you should remove these
-    # lines, delete config/database.yml and disable :active_record
-    # in your config/boot.rb
-    config.use_transactional_fixtures = true
-    config.use_instantiated_fixtures  = false
-    config.fixture_path = RAILS_ROOT + '/spec/fixtures/'
-           
-    config.include AuthenticatedTestHelper, :type=>:controllers      
-    # == Notes
-    # 
-    # For more information take a look at Spec::Example::Configuration and Spec::Runner
-    config.include(EmailSpec::Helpers)
-    config.include(EmailSpec::Matchers)
-    
-    config.before(:each) do
-      # old cache stuff
-      Wagn::Cache.reset_for_tests
-    end
-
+  def newcard(name, content="")
+    Card.create! :name=>name, :content=>content
   end
 end
 
-Spork.each_run do     
+Spork.prefork do
+  require File.expand_path File.dirname(__FILE__) + "/../config/environment"
+  require File.expand_path File.dirname(__FILE__) + "/../lib/authenticated_test_helper"
+
+  #require File.expand_path File.dirname(__FILE__) + "/../lib/util/card_builder"
+  require 'rspec/rails'
+
+  require_dependency 'chunks/chunk'
+
+  # Requires supporting ruby files with custom matchers and macros, etc,
+  # in spec/support/ and its subdirectories.
+  Dir[Rails.root.join("spec/support/**/*.rb")].each {|f| require f}
+
+  FIXTURES_PATH = File.dirname(__FILE__) + '/../fixtures'
+
+  RSpec.configure do |config|
+
+    config.include RSpec::Rails::Matchers::RoutingMatchers, :example_group => {
+      :file_path => /\bspec\/controllers\// }
+
+    #config.include CustomMatchers
+    #config.include ControllerMacros, :type=>:controllers
+    config.include AuthenticatedTestHelper, :type=>:controllers
+
+    # == Mock Framework
+    # If you prefer to mock with mocha, flexmock or RR, uncomment the appropriate symbol:
+    # :mocha, :flexmock, :rr
+
+    config.mock_with :rr
+
+    config.fixture_path = "#{::Rails.root}/spec/fixtures"
+    config.use_transactional_fixtures = true
+    config.use_instantiated_fixtures  = false
+
+
+    config.before(:each) do
+      Wagn::Cache.restore
+    end
+    config.after(:each) do
+      Timecop.return
+    end
+  end
+end
+
+
+Spork.each_run do
   # This code will be run each time you run your specs.
 end
 
-# --- Instructions ---
-# - Sort through your spec_helper file. Place as much environment loading 
-#   code that you don't normally modify during development in the 
-#   Spork.prefork block.
-# - Place the rest under Spork.each_run block
-# - Any code that is left outside of the blocks will be ran during preforking
-#   and during each_run!
-# - These instructions should self-destruct in 10 seconds.  If they don't,
-#   feel free to delete them.
-#
+=begin
 
 
+  def get_renderer()
+    Wagn::Renderer.new(Card.new(:name=>'dummy'))
+  end
+
+  def given_card( *card_args )
+    Account.as_bot do
+      Card.create *card_args
+    end
+  end
 
 
+  def assert_difference(object, method = nil, difference = 1)
+    initial_value = object.send(method)
+    yield
+    assert_equal initial_value + difference, object.send(method), "#{object}##{method}"
+  end
+
+  def assert_no_difference(object, method, &block)
+    assert_difference object, method, 0, &block
+  end
+
+  USERS = {
+    'joe@user.com' => 'joe_pass',
+    'joe@admin.com' => 'joe_pass',
+    'u3@user.com' => 'u3_pass'
+  }
+
+  def integration_login_as(user, functional=nil)
+    raise "Don't know email & password for #{user}" unless uc=Card[user] and
+        u=User[ uc.id ] and
+        login = u.email and pass = USERS[login]
+
+    if functional
+      #warn "functional login #{login}, #{pass}"
+      post :signin, :login=>login, :password=>pass, :controller=>:account
+    else
+      #warn "integration login #{login}, #{pass}"
+      post 'account/signin', :login=>login, :password=>pass, :controller=>:account
+    end
+    assert_response :redirect
+
+    if block_given?
+      yield
+      post 'account/signout',:controller=>'account'
+    end
+  end
+
+  def post_invite(options = {})
+    action = options[:action] || :invite
+    post action,
+      :account => { :email => 'new@user.com' }.merge(options[:account]||{}),
+      :card => { :name => "New User" }.merge(options[:card]||{}),
+      :email => { :subject => "mailit",  :message => "baby"  }
+  end
+
+#  def test_render(url)
+#    get url
+#    assert_response :success, "#{url} should render successfully"
+#  end
+
+#  def test_action(url, args={})
+#    post( url, *args )
+#    assert_response :success
+#  end
+
+  def assert_rjs_redirected_to(url)
+    assert @response.body.match(/window\.location\.href = \"([^\"]+)\";/)
+    assert_equal $~[1], url
+  end
+end
+
+module Test
+  module Unit
+    module Assertions
+      def assert_success(bypass_content_parsing = false)
+        assert_response :success
+        unless bypass_content_parsing
+          assert_nothing_raised(@response.content) { REXML::Document.new(@response.content) }
+        end
+      end
+    end
+  end
+end
+=end

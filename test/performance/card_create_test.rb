@@ -1,19 +1,20 @@
+# -*- encoding : utf-8 -*-
 require 'test_helper'
-require 'performance_test_help'
+require 'rails/performance_test_help'
+ 
+class CardCreateTest < ActionDispatch::PerformanceTest
 
-class CardCreateTest < ActionController::PerformanceTest
-  # Replace this with your real tests.
-  def initialize(*args)
+  def initialize *args
     @name = 'CardA'
-    super(*args)
-    User.as(:wagbot)
+    super *args
+    Account.as Card::WagnBotID
   end
 
   def test_card_create_simple
     Card.create :name =>@name, :content=>"test content"
     @name = @name.next
-  end               
-  
+  end
+
   def test_card_create_links
     Card.create :name =>@name, :content=>"test [[CardA]]"
     @name = @name.next

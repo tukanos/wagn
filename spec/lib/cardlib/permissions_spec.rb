@@ -1,242 +1,344 @@
-require File.dirname(__FILE__) + '/../../spec_helper'
-require File.expand_path(File.dirname(__FILE__) + '/../../permission_spec_helper')
+# -*- encoding : utf-8 -*-
+require File.expand_path('../../spec_helper', File.dirname(__FILE__))
+require File.expand_path('../../permission_spec_helper', File.dirname(__FILE__))
+require File.expand_path('../../packs/pack_spec_helper', File.dirname(__FILE__))
 
-describe "Permission", ActiveSupport::TestCase do
+describe "reader rules" do
   before do
-    User.as( :wagbot )
-    @u1, @u2, @u3 = %w( u1 u2 u3 ).map do |x| ::User.find_by_login(x) end
-    @r1, @r2, @r3 = %w( r1 r2 r3 ).map do |x| ::Role[x] end
-    @c1, @c2, @c3 = %w( c1 c2 c3 ).map do |x| Card.find_by_name(x) end
-  end      
-
-=begin
-  it "create connections" do
-    a = Card.create! :name=>'a44'
-    a.permit(:read, @r1); a.save!
-    b = Card.create! :name=>'b44'
-    b.permit(:read, @r2); b.save! 
-
-    #private cards can't be connected to private cards with a different group
-    ab = Card.create :name=>'a44+b44'
-    ab.permit :read, ::Role[:anon]
-    ab.save
-    ab.errors.on(:permissions).should_not == nil
-    
-    ba = Card.create :name=>'b44+a44'
-    ba.errors.on(:permissions).should_not == nil
-
-    #private cards connected to non-private are private with the same group    
-    ac = Card.create :name=>'a44+c44'
-    ac.reader.should == a.reader
+    @perm_card =  Card.new(:name=>'Home+*self+*read', :type=>'Pointer', :content=>'[[Anyone Signed In]]')
   end
-=end
 
+  it "should be *all+*read by default" do
+    card = Card.fetch('Home')
+    card.read_rule_id.should == Card.fetch('*all+*read').id
+    card.who_can(:read).should ==  [Card::AnyoneID]
+    Account.as(:anonymous){ card.ok?(:read).should be_true }
+  end
 
-  it "create connections" do
-    a, b, c, d = [ 
-      Card.create!( :name=> "a33" ),
-      Card.create!( :name=> "b33" ),
-      Card.create!( :name=> "c33" ),
-      Card.create!( :name=> "d33" )
-    ]
+  it "should update to role ('Anyone Signed In')" do
 
-    a.save; a=Card.find_by_name('a33');a.permit(:read, @r1); 
-    b.save; b=Card.find_by_name('b33');b.permit(:read, @r2); 
-    a.save; a=Card.find_by_name('a33');
-    b.save; b=Card.find_by_name('b33');
+    name = @perm_card.name
+    Account.as_bot { @perm_card.save! }
+    pc = Card[name]
+    card = Card['Home']
+    #warn "card #{name}, #{card.inspect}, #{pc.inspect}"
+    pc.should be
+    card.read_rule_id.should == pc.id
+    card.who_can(:read).should == [Card::AuthID]
+    Account.as(:anonymous){ card.ok?(:read).should be_false }
+  end
 
-    #private cards connected to non-private are private with the same group    
-    ac = Card.create :name=>'a33+c33'
-    assert_equal ac.who_can(:read), ac.reader, "reader (#{ac.reader.codename}) and who can read (#{ac.who_can(:read).codename}) should be same for card #{ac.name}"
-    assert_equal ac.reader, @r1, "a+c should be restricted to r1 too"
+  it "should update to user ('Joe Admin')" do
+    @perm_card.content = '[[Joe Admin]]'
+    Account.as_bot { @perm_card.save! }
 
-    c = Card['c33']
-    c.permit :read, Role[:anon]
+    card = Card.fetch('Home')
+    card.read_rule_id.should == @perm_card.id
+    card.who_can(:read).should == [Card['joe_admin'].id]
+    Account.as(:anonymous) { card.ok?(:read).should be_false }
+    Account.as(:joe_user)  { card.ok?(:read).should be_false }
+    Account.as(:joe_admin) { card.ok?(:read).should be_true  }
+    Account.as_bot         { card.ok?(:read).should be_true  }
+  end
+
+  it "should revert to more general rule when more specific (self) rule is deleted" do
+    Account.as_bot do
+      @perm_card.save!
+      @perm_card.delete!
+    end
+    card = Card.fetch('Home')
+    card.read_rule_id.should == Card.fetch('*all+*read').id
+  end
+
+  it "should revert to more general rule when more specific (right) rule is deleted" do
+    pc = nil
+    Account.as_bot do
+      pc=Card.create(:name=>'B+*right+*read', :type=>'Pointer', :content=>'[[Anyone Signed In]]')
+    end
+    pc.should be
+    card = Card.fetch('A+B')
+    card.read_rule_id.should == pc.id
+    pc = Card.fetch(pc.name) #important to re-fetch to catch issues with detecting change in trash status.
+    Account.as_bot { pc.delete }
+    card = Card.fetch('A+B')
+    card.read_rule_id.should == Card.fetch('*all+*read').id
+  end
+
+  it "should revert to more general rule when more specific rule is renamed" do
+
+    Account.as_bot do
+      @perm_card.save!
+      @perm_card = Card[@perm_card.name]
+      @perm_card.name = 'Something else+*self+*read'
+      @perm_card.save!
+    end
+
+    card = Card.fetch('Home')
+    card.read_rule_id.should == Card.fetch('*all+*read').id
+  end
+
+  it "should not be overruled by a more general rule added later" do
+    Account.as_bot do
+      @perm_card.save!
+      c= Card.fetch('Home')
+      c.type_id = Card::PhraseID
+      c.save!
+      Card.create(:name=>'Phrase+*type+*read', :type=>'Pointer', :content=>'[[Joe User]]')
+    end
+
+    card = Card.fetch('Home')
+    card.read_rule_id.should == @perm_card.id
+  end
+
+  it "should get updated when trunk type change makes type-plus-right apply / unapply" do
+    @perm_card.name = "Phrase+B+*type plus right+*read"
+    Account.as_bot { @perm_card.save! }
+    Card.fetch('A+B').read_rule_id.should == Card.fetch('*all+*read').id
+    c = Card.fetch('A')
+    c.type_id = Card::PhraseID
+    c.save!
+    Card.fetch('A+B').read_rule_id.should == @perm_card.id
+  end
+
+  it "should work with relative settings" do
+    Account.as_bot do
+      @perm_card.save!
+      all_plus = Card.fetch '*all plus+*read', :new=>{:content=>'_left'}
+      all_plus.save
+    end
+    c = Card.new(:name=>'Home+Heart')
+    c.who_can(:read).should == [Card::AuthID]
+    c.permission_rule_card(:read).first.id.should == @perm_card.id
     c.save
-    assert_equal c.reader.codename, 'anon', " c should still be set to Anyone"
+    c.read_rule_id.should == @perm_card.id
   end
 
-  it "checking ok read should not add to errors" do
-    User.as(:joe_admin)
-    h = Card.create! :name=>"Hidden"
-    h.permit(:read, Role[:auth])   
-    h.save!
-  
-    User.as(:anon)
-    h = Card["Hidden"]
-    h.ok?(:read)
-    h.errors.empty?.should_not == nil
-  end   
+  it "should get updated when relative settings change" do
+    Account.as_bot do
+      all_plus = Card.fetch '*all plus+*read', :new=>{:content=>'_left'}
+      all_plus.save
+    end
+    c = Card.new(:name=>'Home+Heart')
+    c.who_can(:read).should == [Card::AnyoneID]
+    c.permission_rule_card(:read).first.id.should == Card.fetch('*all+*read').id
+    c.save
+    c.read_rule_id.should == Card.fetch('*all+*read').id
+    Account.as_bot { @perm_card.save! }
+    c2 = Card.fetch('Home+Heart')
+    c2.who_can(:read).should == [Card::AuthID]
+    c2.read_rule_id.should == @perm_card.id
+    Card.fetch('Home+Heart').read_rule_id.should == @perm_card.id
+    Account.as_bot{ @perm_card.delete }
+    Card.fetch('Home').read_rule_id.should == Card.fetch('*all+*read').id
+    Card.fetch('Home+Heart').read_rule_id.should == Card.fetch('*all+*read').id
+  end
 
-  it "reader setting" do
-    Card.find(:all).each do |c|
-      who = c.who_can(:read)
-      assert_equal who, c.reader, "reader (#{c.reader.codename}) and who can read (#{who.codename}) should be same for card #{c.name}"
+  it "should insure that class overrides work with relative settings" do
+    Account.as_bot do
+      all_plus = Card.fetch '*all plus+*read', :new=>{:content=>'_left'}
+      all_plus.save
+      Account.as_bot { @perm_card.save! }
+      c = Card.create(:name=>'Home+Heart')
+      c.read_rule_id.should == @perm_card.id
+      r = Card.create(:name=>'Heart+*right+*read', :type=>'Pointer', :content=>'[[Administrator]]')
+      Card.fetch('Home+Heart').read_rule_id.should == r.id
     end
   end
 
-  it "write user permissions" do
-    @u1.roles = [ @r1, @r2 ]
-    @u2.roles = [ @r1, @r3 ]
-    @u3.roles = [ @r1, @r2, @r3 ]
-
-    ::User.as(:wagbot) { 
-      @c1.permit(:edit, @u1); @c1.save
-      @c2.permit(:edit, @u2); @c2.save 
-    }
- 
-    assert_not_locked_from( @u1, @c1 )
-    assert_locked_from( @u2, @c1 )    
-    assert_locked_from( @u3, @c1 )    
-    
-    assert_locked_from( @u1, @c2 )
-    assert_not_locked_from( @u2, @c2 )    
-    assert_locked_from( @u3, @c2 )    
+  it "should work on virtual+virtual cards" do
+    c = Card.fetch('Number+*type+by name')
+    c.ok?(:read).should be_true
   end
- 
-  it "read group permissions" do
-    @u1.roles = [ @r1, @r2 ]; @u1.save;
-    @u2.roles = [ @r1, @r3 ]; @u2.save;
 
-    @c1.permit(:read, @r1); @c1.save
-    @c2.permit(:read, @r2); @c2.save
-    @c3.permit(:read, @r3); @c3.save
+end
+
+
+
+describe "Permission", ActiveSupport::TestCase do
+  before do
+    Account.as_bot do
+#      User.cache.reset
+      @u1, @u2, @u3, @r1, @r2, @r3, @c1, @c2, @c3 =
+        %w( u1 u2 u3 r1 r2 r3 c1 c2 c3 ).map do |x| Card[x] end
+    end
+  end
+
+
+  it "checking ok read should not add to errors" do
+    Account.as_bot do
+      Account.always_ok?.should == true
+    end
+    Account.as(:joe_user) do
+      Account.always_ok?.should == false
+    end
+    Account.as(:joe_admin) do
+      Account.always_ok?.should == true
+      Card.create! :name=>"Hidden"
+      Card.create(:name=>'Hidden+*self+*read', :type=>'Pointer', :content=>'[[Anyone Signed In]]')
+    end
+
+    Account.as(:anonymous) do
+      h = Card.fetch('Hidden')
+      h.ok?(:read).should == false
+      h.errors.empty?.should_not == nil
+    end
+  end
+
+  it "should be granted to admin if to anybody" do
+    Account.as_bot do
+      c1 = Card['c1']
+      Card.create! :name=>'c1+*self+*comment', :type=>'Pointer', :content=>'[[r1]]'
+      c1.who_can( :comment ).should == [Card['r1'].id]
+      c1.ok?(:comment).should be_true
+    end
+  end
+
+  it "reader setting" do
+    Card.where(:trash=>false).each do |c|
+      prc = c.permission_rule_card(:read)
+      #warn "C #{c.inspect}, #{c.read_rule_id}, #{prc.first.id}, #{c.read_rule_class}, #{prc.second}, #{prc.first.inspect}" unless prc.last == c.read_rule_class && prc.first.id == c.read_rule_id
+      prc.last.should == c.read_rule_class
+      prc.first.id.should == c.read_rule_id
+    end
+  end
+
+
+  it "write user permissions" do
+    Account.as_bot do
+      @u1.fetch(:trait=>:roles, :new=>{}).items = [@r1, @r2]
+      @u2.fetch(:trait=>:roles, :new=>{}).items = [@r1, @r3]
+      @u3.fetch(:trait=>:roles, :new=>{}).items = [@r1, @r2, @r3]
+
+      cards=[1,2,3].map do |num|
+        Card.create(:name=>"c#{num}+*self+*update", :type=>'Pointer', :content=>"[[u#{num}]]")
+      end
+    end
+
+    @c1 = Card['c1']
+    assert_not_locked_from( @u1, @c1 )
+    assert_locked_from( @u2, @c1 )
+    assert_locked_from( @u3, @c1 )
+
+    @c2 = Card['c2']
+    assert_locked_from( @u1, @c2 )
+    assert_not_locked_from( @u2, @c2 )
+    assert_locked_from( @u3, @c2 )
+  end
+
+  it "read group permissions" do
+    Account.as_bot do
+      @u1.fetch(:trait=>:roles).items = [@r1, @r2]
+      @u2.fetch(:trait=>:roles).items = [@r1, @r3]
+
+      [1,2,3].each do |num|
+        Card.create(:name=>"c#{num}+*self+*read", :type=>'Pointer', :content=>"[[r#{num}]]")
+      end
+    end
 
     assert_not_hidden_from( @u1, @c1 )
     assert_not_hidden_from( @u1, @c2 )
-    assert_hidden_from( @u1, @c3 )    
-    
+    assert_hidden_from( @u1, @c3 )
+
     assert_not_hidden_from( @u2, @c1 )
-    assert_hidden_from( @u2, @c2 )    
-    assert_not_hidden_from( @u2, @c3 )    
+    assert_hidden_from( @u2, @c2 )
+    assert_not_hidden_from( @u2, @c3 )
   end
 
   it "write group permissions" do
-    @c1.permit(:edit,@r1); @c1.save
-    @c2.permit(:edit,@r2); @c2.save
-    @c3.permit(:edit,@r3); @c3.save
-    
-    @u3.roles = [ @r1 ]  #not :admin here
+    Account.as_bot do
+      [1,2,3].each do |num|
+        Card.create(:name=>"c#{num}+*self+*update", :type=>'Pointer', :content=>"[[r#{num}]]")
+      end
+
+      @u3.fetch(:trait=>:roles, :new=>{}).items = [@r1]
+    end
 
     %{        u1 u2 u3
       c1(r1)  T  T  T
       c2(r2)  T  T  F
       c3(r3)  T  F  F
     }
+
     assert_equal true,  @c1.writeable_by(@u1), "c1 writeable by u1"
-    assert_equal true,  @c1.writeable_by(@u2), "c1 writeable by u2" 
-    assert_equal true,  @c1.writeable_by(@u3), "c1 writeable by u3" 
-    assert_equal true,  @c2.writeable_by(@u1), "c2 writeable by u1" 
-    assert_equal true,  @c2.writeable_by(@u2), "c2 writeable by u2" 
-    assert_equal false, @c2.writeable_by(@u3), "c2 writeable by u3" 
-    assert_equal true,  @c3.writeable_by(@u1), "c3 writeable by u1" 
-    assert_equal false, @c3.writeable_by(@u2), "c3 writeable by u2" 
-    assert_equal false, @c3.writeable_by(@u3), "c3 writeable by u3" 
+    assert_equal true,  @c1.writeable_by(@u2), "c1 writeable by u2"
+    assert_equal true,  @c1.writeable_by(@u3), "c1 writeable by u3"
+    assert_equal true,  @c2.writeable_by(@u1), "c2 writeable by u1"
+    assert_equal true,  @c2.writeable_by(@u2), "c2 writeable by u2"
+    assert_equal false, @c2.writeable_by(@u3), "c2 writeable by u3"
+    assert_equal true,  @c3.writeable_by(@u1), "c3 writeable by u1"
+    assert_equal false, @c3.writeable_by(@u2), "c3 writeable by u2"
+    assert_equal false, @c3.writeable_by(@u3), "c3 writeable by u3"
   end
 
   it "read user permissions" do
-    @u1.roles = [ @r1, @r2 ]
-    @u2.roles = [ @r1, @r3 ]
-    @u3.roles = [ @r1, @r2, @r3 ]
+    Account.as_bot {
+      @u1.fetch(:trait=>:roles, :new=>{}).items = [@r1, @r2]
+      @u2.fetch(:trait=>:roles, :new=>{}).items = [@r1, @r3]
+      @u3.fetch(:trait=>:roles, :new=>{}).items = [@r1, @r2, @r3]
 
-    ::User.as(:wagbot) { 
-      @c1.permit(:read, @u1); @c1.save 
-      @c2.permit(:read, @u2); @c2.save 
+      [1,2,3].each do |num|
+        Card.create(:name=>"c#{num}+*self+*read", :type=>'Pointer', :content=>"[[u#{num}]]")
+      end
     }
 
 
-    # NOTE: retrieving private cards is known not to work now.      
+    # NOTE: retrieving private cards is known not to work now.
     # assert_not_hidden_from( @u1, @c1 )
-    # assert_not_hidden_from( @u2, @c2 )    
-    
-    assert_hidden_from( @u2, @c1 )    
-    assert_hidden_from( @u3, @c1 )    
+    # assert_not_hidden_from( @u2, @c2 )
+
+    assert_hidden_from( @u2, @c1 )
+    assert_hidden_from( @u3, @c1 )
     assert_hidden_from( @u1, @c2 )
-    assert_hidden_from( @u3, @c2 )    
-  end
-          
-  it "should cascade reader change" do 
-    a, ab, abc, ad = %w(A A+B A+B+C A+D ).collect do |name|  Card.find_by_name(name)  end
-    a.permit(:read,@r1); a.save
-    ab.reload.reader.should == a.reader
-    abc.reload.reader.should == a.reader
-    ad.reload.reader.should == a.reader
+    assert_hidden_from( @u3, @c2 )
   end
 
-  it "should allow reader change on existing connections" do
-    a, ab, abc, ad = %w(A A+B A+B+C A+D ).collect do |name|  Card.find_by_name(name)  end
-    a.permit(:read, @r1); a.save
-    
-    # assert that cards of which a is a part have also been changed
-    ab.reload.reader.should == a.reader
-    abc.reload.reader.should == a.reader
-    ad.reload.reader.should == a.reader
-
-    # now change it again.  should still work
-    a.permit(:read, @r2); a.save
-    
-    # assert that cards of which a is a part have also been changed
-    ab.reload.reader.should == a.reader
-    abc.reload.reader.should == a.reader
-    ad.reload.reader.should == a.reader
-  end
-          
-  it "anon user should exist" do
-    assert_instance_of User, User.find_by_login('anon')
-  end
- 
 
   it "private wql" do
-    # set up cards of type TestType, 2 with nil reader, 1 with role1 reader 
-     ::User.as(:wagbot) do 
-       [@c1,@c2,@c3].each do |c| 
-         c.update_attribute(:content, 'WeirdWord')
-         c.save
-         c.permit(:read, Role[:anon])    #fixme -- this should be done by setting the cardtype perms
+    # set up cards of type TestType, 2 with nil reader, 1 with role1 reader
+     Account.as_bot do
+       [@c1,@c2,@c3].each do |c|
+         c.update_attributes :content => 'WeirdWord'
        end
-       @c1.permit(:read,@u1); @c1.save
+       Card.create(:name=>"c1+*self+*read", :type=>'Pointer', :content=>"[[u1]]")
      end
-  
-     ::User.as(@u1) do
-       # NOTE: retrieving private cards is known not to work now.      
-       Card.search(:content=>'WeirdWord').plot(:name).sort.should == %w( c2 c3 )
-       #assert_equal %w( c1 c2 c3 ), Card.search(:content=>'WeirdWord').plot(:name).sort
+
+     Account.as(@u1) do
+       Card.search(:content=>'WeirdWord').map(&:name).sort.should == %w( c1 c2 c3 )
      end
-     ::User.as(@u2) do
-       Card.search(:content=>'WeirdWord').plot(:name).sort.should == %w( c2 c3 )
+     Account.as(@u2) do
+       Card.search(:content=>'WeirdWord').map(&:name).sort.should == %w( c2 c3 )
      end
   end
 
   it "role wql" do
-    @r1.users = [ @u1 ]
+    #warn "u1 roles #{Card[ @u1.id ].fetch(:trait=>:roles).item_names.inspect}"
 
-    # set up cards of type TestType, 2 with nil reader, 1 with role1 reader 
-    ::User.as(:wagbot) do 
-      [@c1,@c2,@c3].each do |c| 
-        c.update_attribute(:content, 'WeirdWord')
-        c.save
-        c.permit(:read, Role[:anon])    
+    # set up cards of type TestType, 2 with nil reader, 1 with role1 reader
+    Account.as_bot do
+      [@c1,@c2,@c3].each do |c|
+        c.update_attributes :content => 'WeirdWord'
       end
-      @c1.permit(:read, @r1); @c1.save
+      Card.create(:name=>"c1+*self+*read", :type=>'Pointer', :content=>"[[r3]]")
     end
 
-    ::User.as(@u1) do
-      Card.search(:content=>'WeirdWord').plot(:name).sort.should == %w( c1 c2 c3 )
+    Account.as(@u1) do
+      Card.search(:content=>'WeirdWord').map(&:name).sort.should == %w( c1 c2 c3 )
     end
-    ::User.as(@u2) do
-      Card.search(:content=>'WeirdWord').plot(:name).sort.should == %w( c2 c3 )
+    Account.current_id =nil # for Account.as to be effective, you can't have a logged in user
+    Account.as(@u2) do
+      Card.search(:content=>'WeirdWord').map(&:name).sort.should == %w( c2 c3 )
     end
-  end  
+  end
 
   def permission_matrix
     # TODO
     # generate this graph three ways:
     # given a card with editor in group X, can Y edit it?
     # given a card with reader in group X, can Y view it?
-    # given c card with group anon, can Y change the reader/writer to X    
-    
-    # X,Y in Anon, auth Member, auth Nonmember, admin       
-    
+    # given c card with group anon, can Y change the reader/writer to X
+
+    # X,Y in Anon, auth Member, auth Nonmember, admin
+
     %{
   A V C J G
 A * * * * *
@@ -244,81 +346,21 @@ V * * . * .
 C * * * . .
 J * * . . .
 G * . . . .
-}   
-    
+}
+
   end
 
 end
 
 
-describe Card, "New plus card with one restricted piece" do
-  before do
-    User.as :wagbot 
-    c = Card['c']
-    c.permit :read, Role['r1']
-    c.save!    
-    @cd = Card.create! :name=>'c+d'
-  end
-  
-  it "should be restricted to the same party" do
-    @cd.who_can(:read).should == Role['r1']
-  end
-end
-
-describe Card, "Piece Card with new restriction" do
-  before do
-    User.as :wagbot 
-    @cd = Card.create! :name=>'c+d'
-    c = Card['c']
-    c.permit :read, Role['r1']
-    c.save!
-  end
-  
-  it "should show the restriction change" do
-    Card['c'].who_can(:read).should == Role['r1']
-  end
-  it "should restrict its connections." do
-    Card['c+d'].who_can(:read).should == Role['r1']
-  end
-end
 
 
-describe Card, "Piece of Connection Card with restriction" do
-  before do
-    User.as :wagbot 
-    @cd = Card.create :name=>'c+d'
-    @cd.permit :read, Role['r2']
-    @cd.save!
-    @c = Card['c']
-  end
-  
-  it "should be possible to set it to Anyone" do
-    @c.permit :read, Role[:anon]
-    @c.save
-    @c.errors.on(:permissions).should == nil
-  end
-
-  it "should be possible to set it to the same party as the connection card restriction" do
-    @c.permit :read, Role['r2']
-    @c.save
-    @c.errors.on(:permissions).should == nil
-  end
-end
-
-    
 describe Card, "new permissions" do
-  User.as :joe_user
-  
+  Account.as :joe_user
+
   it "should let joe view new cards" do
     @c = Card.new
     @c.ok?(:read).should be_true
-  end
-
-  it "should let joe render content of new cards" do
-    @c = Card.new
-    Slot.new(@c).render.should be_html_with do
-      span(:class=>"open-content content editOnDoubleClick") {}
-    end
   end
 
 end
@@ -326,98 +368,56 @@ end
 
 describe Card, "default permissions" do
   before do
-    User.as :joe_user do
+    Account.as :joe_user do
       @c = Card.create! :name=>"sky blue"
     end
   end
-  
+
   it "should let anonymous users view basic cards" do
-    User.as :anon
-    @c.ok?(:read).should be_true
+    Account.as :anonymous do
+      @c.ok?(:read).should be_true
+    end
   end
-  
+
   it "should let joe view basic cards" do
-    User.as :joe_user
-    @c.ok?(:read).should be_true
+    Account.as :joe_user do
+      @c.ok?(:read).should be_true
+    end
   end
-end
 
-describe Card, "updating permissions" do
-  before do
-    User.as :wagbot 
-    @anon = Role[:anon]
-    @auth = Role[:auth]
-    @perms = [:read,:edit,:comment,:delete].map{|t| ::Permission.new(:task=>t.to_s, :party=>@anon)}
-    @c = Card.find_by_name 'X'
-    @c.permissions=@perms
-    @c.save!
-  end
-  
-  it "should give permissions to auth after setting permissions" do
-    @c.permissions.find_by_task('read').party.should== @anon
-  end
-  
-  it "should set the reader in the process" do
-    @c.who_can(:read).should== @anon
-  end
-  it "should retain these permissions after a hard reload" do
-    @c = Card.find_by_name 'X'
-    @c.permissions.find_by_task('read').party.should== @anon
-  end
 end
 
 
-describe Card, "Permit method on existing card" do
-  before do
-    User.as :wagbot 
-    @c = Card.find_by_name 'X'
-    @r2 = Role['r2']
-    @c.permit(:read, @r2)
-    @c.save!
-  end
-  
-  it "should give permissions after setting permissions" do
-     @c.permissions.find_by_task('read').party.should== @r2
-   end
-  it "should immediately be ok to read" do
-    @c.who_can(:read).should== @r2
-  end
-  it "should still work after reload" do
-    @c = Card.find_by_name 'X'
-    @c.who_can(:read).should== @r2
-  end
-  it "should update reader" do
-    @c.who_can(:read) == @r2
-  end
-  it "should update reader -- even after reload" do
-    @c = Card.find_by_name 'X'
-    @c.who_can(:read) == @r2
-  end
-end  
 
-describe Card, "Permit method on new card" do
+describe Card, "settings based permissions" do
   before do
-    User.as :wagbot 
-    @c = Card.create :name=>'New Bee'
-    @r2 = Role['r2']
-    @c.permit(:read, @r2)
-    @c.save
+    Account.as_bot do
+      @delete_rule_card = Card.fetch '*all+*delete', :new=>{}
+      @delete_rule_card.type_id = Card::PointerID
+      @delete_rule_card.content = '[[Joe_User]]'
+      @delete_rule_card.save!
+    end
   end
-  
-  it "should give permissions after setting permissions" do
-     @c.permissions.find_by_task('read').party.should== @r2
-   end
-  it "should immediately be ok to read" do
-    @c.who_can(:read).should== @r2
-  end
-  it "should still work after reload" do
-    @c = Card.find_by_name 'New Bee'
-    @c.who_can(:read).should== @r2
-  end
-  it "should update reader" do
-    @c.who_can(:read) == @r2
+
+  it "should handle delete as a setting" do
+    c = Card.new :name=>'whatever'
+    c.who_can(:delete).should == [Card['joe_user'].id]
+    Account.as(:joe_user) do
+      c.ok?(:delete).should == true
+    end
+    Account.as(:u1) do
+      c.ok?(:delete).should == false
+    end
+    Account.as(:anonymous) do
+      c.ok?(:delete).should == false
+    end
+    Account.as_bot do
+      c.ok?(:delete).should == true #because administrator
+    end
   end
 end
+
+
 
 # FIXME-perm
 
